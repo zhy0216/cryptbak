@@ -11,6 +11,7 @@ const FileMetadata = struct {
     last_modified: i128,
     size: u64,
     hash: [32]u8, // SHA-256 hash
+    is_directory: bool = false, // 添加标志来表示这是一个目录
 };
 
 const BackupMetadata = struct {
@@ -240,6 +241,7 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
         try writer.writeInt(i128, file_meta.last_modified, .little);
         try writer.writeInt(u64, file_meta.size, .little);
         try writer.writeAll(&file_meta.hash);
+        try writer.writeBool(file_meta.is_directory);
     }
 
     // 打印要加密的第一部分数据用于调试
@@ -489,11 +491,19 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
             return error.InvalidMetadataFile;
         }
 
+        var is_directory: bool = false;
+        const is_directory_read = reader.readBool() catch |err| {
+            std.debug.print("Error reading is_directory: {any}\n", .{err});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        };
+
         metadata.files.append(FileMetadata{
             .path = path,
             .last_modified = last_modified,
             .size = size,
             .hash = hash,
+            .is_directory = is_directory,
         }) catch |err| {
             std.debug.print("Failed to append file metadata: {any}\n", .{err});
             allocator.free(path);
@@ -532,9 +542,40 @@ fn scanDirectory(allocator: Allocator, dir_path: []const u8, base_path: []const 
         defer allocator.free(full_path);
 
         if (entry.kind == .directory) {
+            // 检查目录是否为空
+            var is_empty = true;
+            {
+                var sub_dir = try fs.cwd().openDir(full_path, .{ .iterate = true });
+                defer sub_dir.close();
+                
+                var sub_iter = sub_dir.iterate();
+                if (try sub_iter.next()) |_| {
+                    is_empty = false;
+                }
+            }
+            
+            // 获取相对路径
+            const rel_path = try fs.path.relative(allocator, base_path, full_path);
+            defer allocator.free(rel_path);
+            
+            // 如果目录为空，添加到文件列表中作为目录
+            if (is_empty) {
+                const rel_path_dup = try allocator.dupe(u8, rel_path);
+                
+                try file_list.append(FileMetadata{
+                    .path = rel_path_dup,
+                    .last_modified = 0, // 对目录而言不太重要
+                    .size = 0,
+                    .hash = [_]u8{0} ** 32, // 空哈希用于目录
+                    .is_directory = true,
+                });
+            }
+            
             try scanDirectory(allocator, full_path, base_path, file_list);
-        } else if (entry.kind == .file) {
-            const rel_path = getRelativePath(full_path, base_path);
+        } else {
+            const rel_path = try fs.path.relative(allocator, base_path, full_path);
+            defer allocator.free(rel_path);
+            
             const rel_path_dup = try allocator.dupe(u8, rel_path);
 
             const file = try fs.cwd().openFile(full_path, .{});
@@ -548,37 +589,10 @@ fn scanDirectory(allocator: Allocator, dir_path: []const u8, base_path: []const 
                 .last_modified = stat.mtime,
                 .size = stat.size,
                 .hash = hash,
+                .is_directory = false,
             });
         }
     }
-}
-
-fn doEncrypt(allocator: Allocator, config: Config) !void {
-    std.debug.print("Encrypting {s} to {s}\n", .{ config.source_dir, config.output_dir });
-
-    // Ensure output directory exists
-    try fs.cwd().makePath(config.output_dir);
-
-    // 使用全零的初始盐值用于派生密钥，与doDecrypt函数保持一致
-    var initial_salt: [16]u8 = undefined;
-    @memset(&initial_salt, 0); // 使用全零盐值用于初始化
-    var key: [32]u8 = undefined;
-    try deriveCipherKey(config.password, initial_salt, &key);
-
-    // Try to load existing metadata
-    var empty_metadata = BackupMetadata.init(allocator);
-    defer empty_metadata.deinit();
-
-    var existing_metadata = loadMetadata(allocator, config.output_dir, key) catch |err| {
-        if (err == error.FileNotFound) {
-            // If no metadata exists, return an empty one
-            return processBackup(allocator, config, key, empty_metadata);
-        }
-        return err;
-    };
-    defer existing_metadata.deinit();
-
-    return processBackup(allocator, config, key, existing_metadata);
 }
 
 fn processBackup(allocator: Allocator, config: Config, key: [32]u8, existing_metadata: BackupMetadata) !void {
@@ -613,6 +627,14 @@ fn processBackup(allocator: Allocator, config: Config, key: [32]u8, existing_met
         const source_path = try fs.path.join(allocator, &[_][]const u8{ config.source_dir, file.path });
         defer allocator.free(source_path);
 
+        // 如果是目录，只需创建目录
+        if (file.is_directory) {
+            std.debug.print("Creating empty directory: {s}\n", .{file.path});
+            try fs.cwd().makePath(dest_path);
+            try new_metadata.files.append(file);
+            continue;
+        }
+
         const existing_entry = existing_files_map.get(file.path);
         const needs_backup = if (existing_entry) |entry|
             !std.mem.eql(u8, &entry.hash, &file.hash)
@@ -620,40 +642,42 @@ fn processBackup(allocator: Allocator, config: Config, key: [32]u8, existing_met
             true;
 
         if (needs_backup) {
-            std.debug.print("Encrypting file: {s}\n", .{file.path});
-            var nonce_bytes = generateRandomSalt();
-            var nonce: [12]u8 = undefined;
-            std.mem.copyForwards(u8, &nonce, nonce_bytes[0..12]);
+            // Ensure parent directories exist
+            const dest_dir = fs.path.dirname(dest_path) orelse "";
+            if (dest_dir.len > 0) {
+                try fs.cwd().makePath(dest_dir);
+            }
 
-            try encryptFile(source_path, dest_path, key, nonce);
+            std.debug.print("Encrypting file: {s}\n", .{file.path});
+            var nonce: [12]u8 = undefined;
+            std.crypto.random.bytes(&nonce);
+
+            var enc_key = key;
+
+            try encryptFile(source_path, dest_path, &enc_key, nonce);
         } else {
             std.debug.print("File unchanged, skipping: {s}\n", .{file.path});
         }
 
-        // Add to new metadata
-        const path_copy = try allocator.dupe(u8, file.path);
-        try new_metadata.files.append(FileMetadata{
-            .path = path_copy,
-            .last_modified = file.last_modified,
-            .size = file.size,
-            .hash = file.hash,
-        });
+        try new_metadata.files.append(file);
     }
 
-    // Find and remove files that no longer exist in source
+    // Identify files to remove (in backup but not in source)
     var files_to_remove = ArrayList([]const u8).init(allocator);
     defer {
-        for (files_to_remove.items) |file| {
-            allocator.free(file);
+        for (files_to_remove.items) |path| {
+            allocator.free(path);
         }
         files_to_remove.deinit();
     }
 
-    var iter = existing_files_map.keyIterator();
-    while (iter.next()) |existing_key| {
+    var existing_iter = existing_files_map.iterator();
+    while (existing_iter.next()) |entry| {
+        const existing_key = entry.key_ptr.*;
         var found = false;
-        for (current_files.items) |file| {
-            if (std.mem.eql(u8, file.path, existing_key.*)) {
+
+        for (current_files.items) |current| {
+            if (std.mem.eql(u8, current.path, existing_key)) {
                 found = true;
                 break;
             }
@@ -704,11 +728,53 @@ fn doDecrypt(allocator: Allocator, config: Config) !void {
         const dest_path = try fs.path.join(allocator, &[_][]const u8{ config.output_dir, file.path });
         defer allocator.free(dest_path);
 
-        std.debug.print("Decrypting file: {s}\n", .{file.path});
-        try decryptFile(source_path, dest_path, key);
+        // 如果是目录，只需创建目录
+        if (file.is_directory) {
+            std.debug.print("Creating empty directory: {s}\n", .{file.path});
+            try fs.cwd().makePath(dest_path);
+            continue;
+        }
+
+        // Ensure parent directories exist
+        const dest_dir = fs.path.dirname(dest_path) orelse "";
+        if (dest_dir.len > 0) {
+            try fs.cwd().makePath(dest_dir);
+        }
+
+        var dec_key = key;
+
+        try decryptFile(source_path, dest_path, &dec_key);
     }
 
     std.debug.print("Decryption completed successfully!\n", .{});
+}
+
+fn doEncrypt(allocator: Allocator, config: Config) !void {
+    std.debug.print("Encrypting {s} to {s}\n", .{ config.source_dir, config.output_dir });
+
+    // Ensure output directory exists
+    try fs.cwd().makePath(config.output_dir);
+
+    // 使用全零的初始盐值用于派生密钥，与doDecrypt函数保持一致
+    var initial_salt: [16]u8 = undefined;
+    @memset(&initial_salt, 0); // 使用全零盐值用于初始化
+    var key: [32]u8 = undefined;
+    try deriveCipherKey(config.password, initial_salt, &key);
+
+    // Try to load existing metadata
+    var empty_metadata = BackupMetadata.init(allocator);
+    defer empty_metadata.deinit();
+
+    var existing_metadata = loadMetadata(allocator, config.output_dir, key) catch |err| {
+        if (err == error.FileNotFound) {
+            // If no metadata exists, return an empty one
+            return processBackup(allocator, config, key, empty_metadata);
+        }
+        return err;
+    };
+    defer existing_metadata.deinit();
+
+    return processBackup(allocator, config, key, existing_metadata);
 }
 
 pub fn main() !void {
