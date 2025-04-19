@@ -3,6 +3,7 @@
 
 A simple file encryption backup tool written in [Zig](https://ziglang.org/).
 
+This project is developed with the help of [Windsurf](https://www.windsurfrs.com/) and has only been tested on Mac. Use it at your own risk.
 ## Features
 
 - Securely encrypt your backup files
@@ -83,4 +84,3 @@ Run the tests using:
 ```bash
 ./test.sh
 ```
-

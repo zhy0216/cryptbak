@@ -2,6 +2,8 @@
 
 一个简单的文件加密备份工具，使用 [Zig](https://ziglang.org/) 编写。
 
+本项目在 [Windsurf](https://www.windsurfrs.com/) 的帮助下开发，且仅在 Mac 上进行过测试。请自行承担使用风险。
+
 ## 功能
 
 - 加密备份文件
