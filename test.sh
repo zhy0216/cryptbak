@@ -95,21 +95,6 @@ test_simple_decryption() {
     return 0
 }
 
-# 检查内存分配失败的问题
-analyze_memory_issue() {
-    echo -e "\n${YELLOW}分析: 检查内存分配问题${NC}"
-    
-    # 显示可用内存信息
-    echo "系统内存信息:"
-    vm_stat
-    
-    # 查看错误发生位置的代码
-    echo -e "\n加载元数据函数代码片段 (第311行附近):"
-    grep -A 5 -B 5 "const path = try allocator.alloc" "$SOURCE_DIR/../src/main.zig" || echo "找不到相关代码行"
-    
-    echo -e "\n${YELLOW}建议: 可能需要检查loadMetadata函数的实现，特别是路径分配和反序列化部分。${NC}"
-}
-
 # 运行所有测试
 run_all_tests() {
     setup_test_environment
@@ -119,9 +104,6 @@ run_all_tests() {
     
     # 尝试解密但不影响后续测试
     test_simple_decryption || true
-    
-    # 分析内存问题
-    analyze_memory_issue
     
     echo -e "\n${GREEN}测试完成!${NC}"
     return 0

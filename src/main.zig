@@ -187,7 +187,7 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
     var salt: [16]u8 = undefined;
     std.crypto.random.bytes(&salt);
     try file.writeAll(&salt);
-
+    
     std.debug.print("SaveMetadata: Salt bytes = [ ", .{});
     for (salt) |b| {
         std.debug.print("{d} ", .{b});
@@ -197,26 +197,31 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
     // 添加元数据标记，用于验证
     const METADATA_MARKER = [_]u8{ 'C', 'R', 'Y', 'P', 'T', 'B', 'A', 'K' };
     try file.writeAll(&METADATA_MARKER);
-
+    
     // 写入不加密的版本、时间戳和文件数量
     var header_buf: [20]u8 = undefined; // 4(version) + 8(timestamp) + 8(files_count)
     std.mem.writeInt(u32, header_buf[0..4], metadata.version, .little);
     std.mem.writeInt(i64, header_buf[4..12], metadata.timestamp, .little);
     std.mem.writeInt(u64, header_buf[12..20], metadata.files.items.len, .little);
     try file.writeAll(&header_buf);
-
+    
     std.debug.print("SaveMetadata: Version = {d}\n", .{metadata.version});
     std.debug.print("SaveMetadata: Timestamp = {d}\n", .{metadata.timestamp});
     std.debug.print("SaveMetadata: Files count = {d}\n", .{metadata.files.items.len});
 
     // Write nonce
     try file.writeAll(&nonce);
-
+    
     std.debug.print("SaveMetadata: Nonce bytes = [ ", .{});
     for (nonce) |b| {
         std.debug.print("{d} ", .{b});
     }
     std.debug.print("]\n", .{});
+
+    // 如果没有文件，就不需要加密和写入文件详情
+    if (metadata.files.items.len == 0) {
+        return;
+    }
 
     // 使用salt派生一个新密钥进行加密
     var enc_key: [32]u8 = undefined;
@@ -227,7 +232,7 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
     defer buffer.deinit();
 
     const writer = buffer.writer();
-
+    
     // 文件详细信息部分不再包含版本、时间戳和文件数量
     for (metadata.files.items) |file_meta| {
         try writer.writeInt(u64, file_meta.path.len, .little);
@@ -237,11 +242,23 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
         try writer.writeAll(&file_meta.hash);
     }
 
+    // 打印要加密的第一部分数据用于调试
+    std.debug.print("SaveMetadata: First bytes to encrypt = [ ", .{});
+    const max_print = @min(32, buffer.items.len);
+    for (buffer.items[0..max_print]) |b| {
+        std.debug.print("{d} ", .{b});
+    }
+    std.debug.print("]\n", .{});
+
     // Encrypt and write the metadata
     const encrypted_buffer = try allocator.alloc(u8, buffer.items.len);
     defer allocator.free(encrypted_buffer);
 
-    crypto.stream.chacha.ChaCha20IETF.xor(encrypted_buffer, buffer.items, 0, // counter
+    // 使用一个固定的计数器值
+    const counter: u32 = 0;
+    std.debug.print("SaveMetadata: Encrypting with counter = {d}\n", .{counter});
+    
+    crypto.stream.chacha.ChaCha20IETF.xor(encrypted_buffer, buffer.items, counter,
         enc_key, nonce);
 
     try file.writeAll(encrypted_buffer);
@@ -273,30 +290,51 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     }
     std.debug.print("]\n", .{});
 
-    // 使用salt派生一个新密钥进行解密 - Key derivation must match the saveMetadata function
-    var dec_key: [32]u8 = undefined;
-    try deriveCipherKey(key[0..], salt, &dec_key);
-
-    // Read metadata header marker
+    // 读取元数据标记
     var marker: [8]u8 = undefined;
-    _ = try file.read(&marker);
+    const marker_read = try file.read(&marker);
+    if (marker_read != marker.len) {
+        return error.InvalidMetadataFile;
+    }
+    
     const expected_marker = [_]u8{ 'C', 'R', 'Y', 'P', 'T', 'B', 'A', 'K' };
     if (!std.mem.eql(u8, &marker, &expected_marker)) {
         std.debug.print("Invalid metadata header marker\n", .{});
         return error.InvalidMetadataFile;
     }
     std.debug.print("Metadata: Valid header marker found\n", .{});
-
-    // Read version, timestamp and files count
+    
+    // 读取未加密的元数据头部
     var header_buf: [20]u8 = undefined;
-    _ = try file.read(&header_buf);
+    const header_read = try file.read(&header_buf);
+    if (header_read != header_buf.len) {
+        return error.InvalidMetadataFile;
+    }
+    
+    // 解析元数据基本信息
     const version = std.mem.readInt(u32, header_buf[0..4], .little);
     const timestamp = std.mem.readInt(i64, header_buf[4..12], .little);
     const files_count = std.mem.readInt(u64, header_buf[12..20], .little);
-
+    
     std.debug.print("Metadata: Version = {d}\n", .{version});
     std.debug.print("Metadata: Timestamp = {d}\n", .{timestamp});
     std.debug.print("Metadata: Files count = {d}\n", .{files_count});
+    
+    // 检查文件数量是否合理
+    if (files_count > 100000) {
+        std.debug.print("Metadata: Files count too large: {d}\n", .{files_count});
+        return error.InvalidMetadataFile;
+    }
+    
+    // 创建元数据结构
+    var metadata = BackupMetadata.init(allocator);
+    metadata.version = version;
+    metadata.timestamp = timestamp;
+    
+    // 如果没有文件，直接返回
+    if (files_count == 0) {
+        return metadata;
+    }
 
     // Read nonce
     var nonce: [12]u8 = undefined;
@@ -311,27 +349,35 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     }
     std.debug.print("]\n", .{});
 
+    // 使用salt派生一个新密钥进行解密
+    var dec_key: [32]u8 = undefined;
+    try deriveCipherKey(key[0..], salt, &dec_key);
+
     // Read the rest of the file
     const stat = try file.stat();
-    const encrypted_size = stat.size - nonce.len - salt.len - marker.len - 20; // 8 for marker + 20 for header
-    if (encrypted_size == 0) {
-        // 如果没有加密数据，创建只有基本信息的元数据
-        var empty_metadata = BackupMetadata.init(allocator);
-        empty_metadata.version = version;
-        empty_metadata.timestamp = timestamp;
-        return empty_metadata;
+    // 计算加密数据部分的大小 = 文件总大小 - 头部大小
+    // 头部包括: salt(16) + marker(8) + header_buf(20) + nonce(12)
+    const header_size = salt.len + marker.len + header_buf.len + nonce.len;
+    const encrypted_size = stat.size - header_size;
+    
+    std.debug.print("Metadata: File total size = {d}, header size = {d}, encrypted size = {d}\n", 
+        .{stat.size, header_size, encrypted_size});
+    
+    if (encrypted_size <= 0) {
+        std.debug.print("Metadata: No encrypted data\n", .{});
+        return metadata;
     }
 
-    // 添加安全检查，防止非法的文件数量
-    if (files_count > 100000) {
-        return error.InvalidMetadataFile;
-    }
+    // 预先为 ArrayList 分配足够的容量
+    try metadata.files.ensureTotalCapacity(files_count);
 
     const encrypted_buffer = try allocator.alloc(u8, encrypted_size);
     defer allocator.free(encrypted_buffer);
 
     const bytes_read = try file.read(encrypted_buffer);
     if (bytes_read != encrypted_size) {
+        std.debug.print("Metadata: Failed to read encrypted data. Expected {d} bytes, got {d}\n", 
+            .{encrypted_size, bytes_read});
         return error.InvalidMetadataFile;
     }
 
@@ -339,57 +385,127 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     const decrypted_buffer = try allocator.alloc(u8, encrypted_size);
     defer allocator.free(decrypted_buffer);
 
-    crypto.stream.chacha.ChaCha20IETF.xor(decrypted_buffer, encrypted_buffer, 0, // counter
+    // 使用与加密相同的计数器值
+    const counter: u32 = 0;
+    std.debug.print("LoadMetadata: Decrypting with counter = {d}\n", .{counter});
+    
+    crypto.stream.chacha.ChaCha20IETF.xor(decrypted_buffer, encrypted_buffer, counter,
         dec_key, nonce);
+        
+    // 打印解密后的前32个字节用于调试
+    std.debug.print("LoadMetadata: First bytes of decrypted data = [ ", .{});
+    const max_print = @min(32, decrypted_buffer.len);
+    for (decrypted_buffer[0..max_print]) |b| {
+        std.debug.print("{d} ", .{b});
+    }
+    std.debug.print("]\n", .{});
 
     // Deserialize
-    var metadata = BackupMetadata.init(allocator);
     var stream = std.io.fixedBufferStream(decrypted_buffer);
     const reader = stream.reader();
 
-    // 预先为 ArrayList 分配足够的容量
-    try metadata.files.ensureTotalCapacity(files_count);
-
-    for (0..files_count) |_| {
+    // 读取并添加所有文件元数据
+    for (0..files_count) |i| {
         var path_len_bytes: [8]u8 = undefined;
-        _ = try reader.read(&path_len_bytes);
+        const path_len_read = reader.read(&path_len_bytes) catch |err| {
+            std.debug.print("Error reading path_len for file {d}: {any}\n", .{i, err});
+            return error.InvalidMetadataFile;
+        };
+
+        if (path_len_read != path_len_bytes.len) {
+            std.debug.print("Incomplete path_len read for file {d}: got {d} bytes\n", .{i, path_len_read});
+            return error.InvalidMetadataFile;
+        }
+
         const path_len = std.mem.readInt(u64, &path_len_bytes, .little);
+        std.debug.print("LoadMetadata: File {d} path length = {d}\n", .{i, path_len});
 
         // 添加最大路径长度限制，防止内存分配问题
         const MAX_PATH_LEN: u64 = 1024;
         if (path_len == 0 or path_len > MAX_PATH_LEN) {
+            std.debug.print("Invalid path length {d} for file {d}\n", .{path_len, i});
             return error.InvalidMetadataFile;
         }
 
-        const path = try allocator.alloc(u8, path_len);
-        _ = try reader.read(path);
+        const path = allocator.alloc(u8, path_len) catch |err| {
+            std.debug.print("Failed to allocate memory for path: {any}\n", .{err});
+            return error.InvalidMetadataFile;
+        };
+        errdefer allocator.free(path);
+        
+        const path_read = reader.read(path) catch |err| {
+            std.debug.print("Error reading path data: {any}\n", .{err});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        };
+
+        if (path_read != path_len) {
+            std.debug.print("Incomplete path read for file {d}: got {d} of {d} bytes\n", 
+                .{i, path_read, path_len});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        }
 
         var last_modified_bytes: [16]u8 = undefined;
-        _ = try reader.read(&last_modified_bytes);
+        const last_mod_read = reader.read(&last_modified_bytes) catch |err| {
+            std.debug.print("Error reading last_modified: {any}\n", .{err});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        };
+
+        if (last_mod_read != last_modified_bytes.len) {
+            std.debug.print("Incomplete last_modified read for file {d}\n", .{i});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        }
+
         const last_modified = std.mem.readInt(i128, &last_modified_bytes, .little);
 
         var size_bytes: [8]u8 = undefined;
-        _ = try reader.read(&size_bytes);
+        const size_read = reader.read(&size_bytes) catch |err| {
+            std.debug.print("Error reading size: {any}\n", .{err});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        };
+
+        if (size_read != size_bytes.len) {
+            std.debug.print("Incomplete size read for file {d}\n", .{i});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        }
+
         const size = std.mem.readInt(u64, &size_bytes, .little);
 
         var hash: [32]u8 = undefined;
-        _ = try reader.read(&hash);
+        const hash_read = reader.read(&hash) catch |err| {
+            std.debug.print("Error reading hash: {any}\n", .{err});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        };
 
-        try metadata.files.append(FileMetadata{
+        if (hash_read != hash.len) {
+            std.debug.print("Incomplete hash read for file {d}\n", .{i});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        }
+
+        metadata.files.append(FileMetadata{
             .path = path,
             .last_modified = last_modified,
             .size = size,
             .hash = hash,
-        });
+        }) catch |err| {
+            std.debug.print("Failed to append file metadata: {any}\n", .{err});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        };
     }
-
+    
     // 检查读取的文件数量是否与预期相符
     if (metadata.files.items.len != files_count) {
+        std.debug.print("File count mismatch: expected {d}, got {d}\n", .{files_count, metadata.files.items.len});
         return error.InvalidMetadataFile;
     }
-
-    metadata.version = version;
-    metadata.timestamp = timestamp;
 
     return metadata;
 }
@@ -443,11 +559,11 @@ fn doEncrypt(allocator: Allocator, config: Config) !void {
     // Ensure output directory exists
     try fs.cwd().makePath(config.output_dir);
 
-    // Derive encryption key from password
-    const salt = generateRandomSalt();
-
+    // 使用全零的初始盐值用于派生密钥，与doDecrypt函数保持一致
+    var initial_salt: [16]u8 = undefined;
+    @memset(&initial_salt, 0); // 使用全零盐值用于初始化
     var key: [32]u8 = undefined;
-    try deriveCipherKey(config.password, salt, &key);
+    try deriveCipherKey(config.password, initial_salt, &key);
 
     // Try to load existing metadata
     var empty_metadata = BackupMetadata.init(allocator);
