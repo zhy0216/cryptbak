@@ -204,6 +204,15 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
     var file = try fs.cwd().createFile(metadata_path, .{});
     defer file.close();
     
+    // 写入salt值，以便解密时使用
+    var salt: [16]u8 = undefined;
+    std.crypto.random.bytes(&salt);
+    try file.writeAll(&salt);
+    
+    // 使用salt派生一个新密钥进行加密
+    var enc_key: [32]u8 = undefined;
+    try deriveCipherKey(key[0..], salt, &enc_key);
+    
     // Write nonce
     try file.writeAll(&nonce);
     
@@ -232,7 +241,7 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
         encrypted_buffer,
         buffer.items,
         0, // counter
-        key,
+        enc_key,
         nonce
     );
     
@@ -252,6 +261,13 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     };
     defer file.close();
     
+    // Read salt
+    var salt: [16]u8 = undefined;
+    const salt_read = try file.read(&salt);
+    if (salt_read != salt.len) {
+        return error.InvalidMetadataFile;
+    }
+    
     // Read nonce
     var nonce: [12]u8 = undefined;
     const nonce_read = try file.read(&nonce);
@@ -261,7 +277,7 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     
     // Read the rest of the file
     const stat = try file.stat();
-    const encrypted_size = stat.size - nonce.len;
+    const encrypted_size = stat.size - nonce.len - salt.len;
     if (encrypted_size == 0) {
         return BackupMetadata.init(allocator);
     }
@@ -274,6 +290,10 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
         return error.InvalidMetadataFile;
     }
     
+    // 使用salt派生一个新密钥进行解密
+    var dec_key: [32]u8 = undefined;
+    try deriveCipherKey(key[0..], salt, &dec_key);
+    
     // Decrypt the data
     const decrypted_buffer = try allocator.alloc(u8, encrypted_size);
     defer allocator.free(decrypted_buffer);
@@ -282,7 +302,7 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
         decrypted_buffer,
         encrypted_buffer,
         0, // counter
-        key,
+        dec_key,
         nonce
     );
     
@@ -303,10 +323,21 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     _ = try reader.read(&files_count_bytes);
     const files_count = std.mem.readInt(u64, &files_count_bytes, .little);
     
+    // 添加安全检查，防止非法的文件数量
+    if (files_count > 100000) {
+        return error.InvalidMetadataFile;
+    }
+    
     for (0..files_count) |_| {
         var path_len_bytes: [8]u8 = undefined;
         _ = try reader.read(&path_len_bytes);
         const path_len = std.mem.readInt(u64, &path_len_bytes, .little);
+        
+        // 添加最大路径长度限制，防止内存分配问题
+        const MAX_PATH_LEN: u64 = 1024;
+        if (path_len == 0 or path_len > MAX_PATH_LEN) {
+            return error.InvalidMetadataFile;
+        }
         
         const path = try allocator.alloc(u8, path_len);
         _ = try reader.read(path);
@@ -518,14 +549,11 @@ fn doDecrypt(allocator: Allocator, config: Config) !void {
     // Ensure output directory exists
     try fs.cwd().makePath(config.output_dir);
     
-    // Derive decryption key from password
-    var salt: [16]u8 = undefined;
-    for (0..salt.len) |i| {
-        salt[i] = 0; // Use a fixed salt for now
-    }
-    
+    // 密码转换为密钥 (使用deriveCipherKey而不是直接复制)
     var key: [32]u8 = undefined;
-    try deriveCipherKey(config.password, salt, &key);
+    var initial_salt: [16]u8 = undefined;
+    @memset(&initial_salt, 0); // 使用全零盐值用于初始化
+    try deriveCipherKey(config.password, initial_salt, &key);
     
     // Load metadata
     var metadata = try loadMetadata(allocator, config.source_dir, key);
