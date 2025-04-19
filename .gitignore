@@ -23,3 +23,6 @@ Thumbs.db
 
 # Test files or directories that shouldn't be committed
 test-data/
+test_integration/backup
+test_integration/backup
+test_integration/restore
