@@ -241,7 +241,8 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
         try writer.writeInt(i128, file_meta.last_modified, .little);
         try writer.writeInt(u64, file_meta.size, .little);
         try writer.writeAll(&file_meta.hash);
-        try writer.writeBool(file_meta.is_directory);
+        // 写入is_directory作为单个字节
+        try writer.writeByte(if (file_meta.is_directory) 1 else 0);
     }
 
     // 打印要加密的第一部分数据用于调试
@@ -480,23 +481,34 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
 
         var hash: [32]u8 = undefined;
         const hash_read = reader.read(&hash) catch |err| {
-            std.debug.print("Error reading hash: {any}\n", .{err});
+            std.debug.print("Error reading hash for file {d}: {any}\n", .{i, err});
             allocator.free(path);
             return error.InvalidMetadataFile;
         };
 
         if (hash_read != hash.len) {
-            std.debug.print("Incomplete hash read for file {d}\n", .{i});
+            std.debug.print("Incomplete hash read for file {d}: got {d} bytes\n", .{i, hash_read});
             allocator.free(path);
             return error.InvalidMetadataFile;
         }
 
-        var is_directory: bool = false;
-        const is_directory_read = reader.readBool() catch |err| {
-            std.debug.print("Error reading is_directory: {any}\n", .{err});
+        // 读取is_directory标志（单个字节）
+        var is_directory_byte: [1]u8 = undefined;
+        const is_directory_read = reader.read(&is_directory_byte) catch |err| {
+            std.debug.print("Error reading is_directory flag: {any}\n", .{err});
             allocator.free(path);
             return error.InvalidMetadataFile;
         };
+        
+        // 确保我们读取了完整的字节
+        if (is_directory_read != 1) {
+            std.debug.print("Incomplete is_directory flag read: got {d} bytes\n", .{is_directory_read});
+            allocator.free(path);
+            return error.InvalidMetadataFile;
+        }
+        
+        // 将字节转换为布尔值
+        const is_directory = (is_directory_byte[0] != 0);
 
         metadata.files.append(FileMetadata{
             .path = path,
@@ -536,13 +548,18 @@ fn scanDirectory(allocator: Allocator, dir_path: []const u8, base_path: []const 
     var dir = try fs.cwd().openDir(dir_path, .{ .iterate = true });
     defer dir.close();
 
+    // 检查当前目录是否为空
+    var is_current_dir_empty = true;
+    
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
+        is_current_dir_empty = false; // 只要有一个条目，就不是空目录
+        
         const full_path = try fs.path.join(allocator, &[_][]const u8{ dir_path, entry.name });
         defer allocator.free(full_path);
 
         if (entry.kind == .directory) {
-            // 检查目录是否为空
+            // 检查子目录是否为空
             var is_empty = true;
             {
                 var sub_dir = try fs.cwd().openDir(full_path, .{ .iterate = true });
@@ -558,7 +575,7 @@ fn scanDirectory(allocator: Allocator, dir_path: []const u8, base_path: []const 
             const rel_path = try fs.path.relative(allocator, base_path, full_path);
             defer allocator.free(rel_path);
             
-            // 如果目录为空，添加到文件列表中作为目录
+            // 如果子目录为空，添加到文件列表中作为目录
             if (is_empty) {
                 const rel_path_dup = try allocator.dupe(u8, rel_path);
                 
@@ -593,16 +610,31 @@ fn scanDirectory(allocator: Allocator, dir_path: []const u8, base_path: []const 
             });
         }
     }
+    
+    // 如果当前目录为空，并且不是基目录本身，则添加为空目录
+    if (is_current_dir_empty and !std.mem.eql(u8, dir_path, base_path)) {
+        const rel_path = try fs.path.relative(allocator, base_path, dir_path);
+        defer allocator.free(rel_path);
+        
+        const rel_path_dup = try allocator.dupe(u8, rel_path);
+        
+        try file_list.append(FileMetadata{
+            .path = rel_path_dup,
+            .last_modified = 0,
+            .size = 0,
+            .hash = [_]u8{0} ** 32,
+            .is_directory = true,
+        });
+    }
 }
 
 fn processBackup(allocator: Allocator, config: Config, key: [32]u8, existing_metadata: BackupMetadata) !void {
     // Scan source directory
     var current_files = ArrayList(FileMetadata).init(allocator);
     defer {
-        for (current_files.items) |file| {
-            allocator.free(file.path);
-        }
-        current_files.deinit();
+        // 这里不再直接释放路径，因为路径的所有权已转移到new_metadata
+        current_files.clearRetainingCapacity();
+        current_files.deinit(); // 需要释放ArrayList本身的内存
     }
 
     try scanDirectory(allocator, config.source_dir, config.source_dir, &current_files);
@@ -652,13 +684,14 @@ fn processBackup(allocator: Allocator, config: Config, key: [32]u8, existing_met
             var nonce: [12]u8 = undefined;
             std.crypto.random.bytes(&nonce);
 
-            var enc_key = key;
+            const enc_key = key;
 
-            try encryptFile(source_path, dest_path, &enc_key, nonce);
+            try encryptFile(source_path, dest_path, enc_key, nonce);
         } else {
             std.debug.print("File unchanged, skipping: {s}\n", .{file.path});
         }
 
+        // 文件路径的所有权现在由new_metadata接管，所以不在此处释放
         try new_metadata.files.append(file);
     }
 
@@ -676,7 +709,7 @@ fn processBackup(allocator: Allocator, config: Config, key: [32]u8, existing_met
         const existing_key = entry.key_ptr.*;
         var found = false;
 
-        for (current_files.items) |current| {
+        for (new_metadata.files.items) |current| {
             if (std.mem.eql(u8, current.path, existing_key)) {
                 found = true;
                 break;
@@ -684,7 +717,7 @@ fn processBackup(allocator: Allocator, config: Config, key: [32]u8, existing_met
         }
 
         if (!found) {
-            const path_copy = try allocator.dupe(u8, existing_key.*);
+            const path_copy = try allocator.dupe(u8, existing_key);
             try files_to_remove.append(path_copy);
         }
     }
@@ -741,9 +774,9 @@ fn doDecrypt(allocator: Allocator, config: Config) !void {
             try fs.cwd().makePath(dest_dir);
         }
 
-        var dec_key = key;
+        const dec_key = key;
 
-        try decryptFile(source_path, dest_path, &dec_key);
+        try decryptFile(source_path, dest_path, dec_key);
     }
 
     std.debug.print("Decryption completed successfully!\n", .{});
