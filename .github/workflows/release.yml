@@ -1,0 +1,95 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*' # 当推送以 "v" 开头的标签时触发
+
+jobs:
+  build:
+    name: Build and Create Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: cryptbak-linux
+            asset_name: cryptbak-linux
+          - os: macos-latest
+            artifact_name: cryptbak-macos
+            asset_name: cryptbak-macos
+          - os: windows-latest
+            artifact_name: cryptbak-windows.exe
+            asset_name: cryptbak-windows.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Build Optimized Binary
+        run: |
+          zig build -Doptimize=ReleaseSafe
+          
+      - name: Copy Binary (Non-Windows)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cp zig-out/bin/cryptbak ${{ matrix.artifact_name }}
+          
+      - name: Copy Binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          copy zig-out\bin\cryptbak.exe ${{ matrix.artifact_name }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: cryptbak-linux
+          path: ./artifacts
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: cryptbak-macos
+          path: ./artifacts
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: cryptbak-windows.exe
+          path: ./artifacts
+
+      - name: Make binaries executable
+        run: chmod +x ./artifacts/cryptbak-*
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ./artifacts/cryptbak-linux
+            ./artifacts/cryptbak-macos
+            ./artifacts/cryptbak-windows.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: true
