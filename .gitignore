@@ -1,0 +1,25 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+build/
+build-*/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Test files or directories that shouldn't be committed
+test-data/
