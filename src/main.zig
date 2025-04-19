@@ -188,6 +188,12 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
     std.crypto.random.bytes(&salt);
     try file.writeAll(&salt);
 
+    std.debug.print("SaveMetadata: Salt bytes = [ ", .{});
+    for (salt) |b| {
+        std.debug.print("{d} ", .{b});
+    }
+    std.debug.print("]\n", .{});
+
     // 使用salt派生一个新密钥进行加密
     var enc_key: [32]u8 = undefined;
     try deriveCipherKey(key[0..], salt, &enc_key);
@@ -195,14 +201,29 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
     // Write nonce
     try file.writeAll(&nonce);
 
+    std.debug.print("SaveMetadata: Nonce bytes = [ ", .{});
+    for (nonce) |b| {
+        std.debug.print("{d} ", .{b});
+    }
+    std.debug.print("]\n", .{});
+
     // Serialize metadata
     var buffer = ArrayList(u8).init(allocator);
     defer buffer.deinit();
 
     const writer = buffer.writer();
+
+    // Add a metadata header marker for validation during decryption
+    const METADATA_MARKER = [_]u8{ 'C', 'R', 'Y', 'P', 'T', 'B', 'A', 'K' };
+    try writer.writeAll(&METADATA_MARKER);
+
     try writer.writeInt(u32, metadata.version, .little);
     try writer.writeInt(i64, metadata.timestamp, .little);
     try writer.writeInt(u64, metadata.files.items.len, .little);
+
+    std.debug.print("SaveMetadata: Version = {d}\n", .{metadata.version});
+    std.debug.print("SaveMetadata: Timestamp = {d}\n", .{metadata.timestamp});
+    std.debug.print("SaveMetadata: Files count = {d}\n", .{metadata.files.items.len});
 
     for (metadata.files.items) |file_meta| {
         try writer.writeInt(u64, file_meta.path.len, .little);
@@ -242,12 +263,28 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
         return error.InvalidMetadataFile;
     }
 
+    std.debug.print("Metadata: Salt bytes = [ ", .{});
+    for (salt) |b| {
+        std.debug.print("{d} ", .{b});
+    }
+    std.debug.print("]\n", .{});
+
+    // 使用salt派生一个新密钥进行解密 - Key derivation must match the saveMetadata function
+    var dec_key: [32]u8 = undefined;
+    try deriveCipherKey(key[0..], salt, &dec_key);
+
     // Read nonce
     var nonce: [12]u8 = undefined;
     const nonce_read = try file.read(&nonce);
     if (nonce_read != nonce.len) {
         return error.InvalidMetadataFile;
     }
+
+    std.debug.print("Metadata: Nonce bytes = [ ", .{});
+    for (nonce) |b| {
+        std.debug.print("{d} ", .{b});
+    }
+    std.debug.print("]\n", .{});
 
     // Read the rest of the file
     const stat = try file.stat();
@@ -264,10 +301,6 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
         return error.InvalidMetadataFile;
     }
 
-    // 使用salt派生一个新密钥进行解密
-    var dec_key: [32]u8 = undefined;
-    try deriveCipherKey(key[0..], salt, &dec_key);
-
     // Decrypt the data
     const decrypted_buffer = try allocator.alloc(u8, encrypted_size);
     defer allocator.free(decrypted_buffer);
@@ -280,17 +313,40 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     var stream = std.io.fixedBufferStream(decrypted_buffer);
     const reader = stream.reader();
 
+    // Verify metadata header marker
+    var marker: [8]u8 = undefined;
+    _ = try reader.read(&marker);
+    const expected_marker = [_]u8{ 'C', 'R', 'Y', 'P', 'T', 'B', 'A', 'K' };
+    if (!std.mem.eql(u8, &marker, &expected_marker)) {
+        std.debug.print("Invalid metadata header marker\n", .{});
+        return error.InvalidMetadataFile;
+    }
+    std.debug.print("Metadata: Valid header marker found\n", .{});
+
     var version_bytes: [4]u8 = undefined;
     _ = try reader.read(&version_bytes);
     metadata.version = std.mem.readInt(u32, &version_bytes, .little);
+
+    std.debug.print("Metadata: Version = {d}\n", .{metadata.version});
 
     var timestamp_bytes: [8]u8 = undefined;
     _ = try reader.read(&timestamp_bytes);
     metadata.timestamp = std.mem.readInt(i64, &timestamp_bytes, .little);
 
+    std.debug.print("Metadata: Timestamp = {d}\n", .{metadata.timestamp});
+
     var files_count_bytes: [8]u8 = undefined;
     _ = try reader.read(&files_count_bytes);
     const files_count = std.mem.readInt(u64, &files_count_bytes, .little);
+
+    std.debug.print("Metadata: Reading files_count = {d}\n", .{files_count});
+
+    // Debug the raw bytes too
+    std.debug.print("Metadata: files_count raw bytes = [ ", .{});
+    for (files_count_bytes) |b| {
+        std.debug.print("{d} ", .{b});
+    }
+    std.debug.print("]\n", .{});
 
     // 添加安全检查，防止非法的文件数量
     if (files_count > 100000) {
@@ -402,6 +458,7 @@ fn doEncrypt(allocator: Allocator, config: Config) !void {
 
     var existing_metadata = loadMetadata(allocator, config.output_dir, key) catch |err| {
         if (err == error.FileNotFound) {
+            // If no metadata exists, return an empty one
             return processBackup(allocator, config, key, empty_metadata);
         }
         return err;
