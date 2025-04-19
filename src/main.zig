@@ -194,9 +194,20 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
     }
     std.debug.print("]\n", .{});
 
-    // 使用salt派生一个新密钥进行加密
-    var enc_key: [32]u8 = undefined;
-    try deriveCipherKey(key[0..], salt, &enc_key);
+    // 添加元数据标记，用于验证
+    const METADATA_MARKER = [_]u8{ 'C', 'R', 'Y', 'P', 'T', 'B', 'A', 'K' };
+    try file.writeAll(&METADATA_MARKER);
+
+    // 写入不加密的版本、时间戳和文件数量
+    var header_buf: [20]u8 = undefined; // 4(version) + 8(timestamp) + 8(files_count)
+    std.mem.writeInt(u32, header_buf[0..4], metadata.version, .little);
+    std.mem.writeInt(i64, header_buf[4..12], metadata.timestamp, .little);
+    std.mem.writeInt(u64, header_buf[12..20], metadata.files.items.len, .little);
+    try file.writeAll(&header_buf);
+
+    std.debug.print("SaveMetadata: Version = {d}\n", .{metadata.version});
+    std.debug.print("SaveMetadata: Timestamp = {d}\n", .{metadata.timestamp});
+    std.debug.print("SaveMetadata: Files count = {d}\n", .{metadata.files.items.len});
 
     // Write nonce
     try file.writeAll(&nonce);
@@ -207,24 +218,17 @@ fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []co
     }
     std.debug.print("]\n", .{});
 
-    // Serialize metadata
+    // 使用salt派生一个新密钥进行加密
+    var enc_key: [32]u8 = undefined;
+    try deriveCipherKey(key[0..], salt, &enc_key);
+
+    // Serialize metadata 文件详细信息部分
     var buffer = ArrayList(u8).init(allocator);
     defer buffer.deinit();
 
     const writer = buffer.writer();
 
-    // Add a metadata header marker for validation during decryption
-    const METADATA_MARKER = [_]u8{ 'C', 'R', 'Y', 'P', 'T', 'B', 'A', 'K' };
-    try writer.writeAll(&METADATA_MARKER);
-
-    try writer.writeInt(u32, metadata.version, .little);
-    try writer.writeInt(i64, metadata.timestamp, .little);
-    try writer.writeInt(u64, metadata.files.items.len, .little);
-
-    std.debug.print("SaveMetadata: Version = {d}\n", .{metadata.version});
-    std.debug.print("SaveMetadata: Timestamp = {d}\n", .{metadata.timestamp});
-    std.debug.print("SaveMetadata: Files count = {d}\n", .{metadata.files.items.len});
-
+    // 文件详细信息部分不再包含版本、时间戳和文件数量
     for (metadata.files.items) |file_meta| {
         try writer.writeInt(u64, file_meta.path.len, .little);
         try writer.writeAll(file_meta.path);
@@ -273,6 +277,27 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     var dec_key: [32]u8 = undefined;
     try deriveCipherKey(key[0..], salt, &dec_key);
 
+    // Read metadata header marker
+    var marker: [8]u8 = undefined;
+    _ = try file.read(&marker);
+    const expected_marker = [_]u8{ 'C', 'R', 'Y', 'P', 'T', 'B', 'A', 'K' };
+    if (!std.mem.eql(u8, &marker, &expected_marker)) {
+        std.debug.print("Invalid metadata header marker\n", .{});
+        return error.InvalidMetadataFile;
+    }
+    std.debug.print("Metadata: Valid header marker found\n", .{});
+
+    // Read version, timestamp and files count
+    var header_buf: [20]u8 = undefined;
+    _ = try file.read(&header_buf);
+    const version = std.mem.readInt(u32, header_buf[0..4], .little);
+    const timestamp = std.mem.readInt(i64, header_buf[4..12], .little);
+    const files_count = std.mem.readInt(u64, header_buf[12..20], .little);
+
+    std.debug.print("Metadata: Version = {d}\n", .{version});
+    std.debug.print("Metadata: Timestamp = {d}\n", .{timestamp});
+    std.debug.print("Metadata: Files count = {d}\n", .{files_count});
+
     // Read nonce
     var nonce: [12]u8 = undefined;
     const nonce_read = try file.read(&nonce);
@@ -288,9 +313,18 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
 
     // Read the rest of the file
     const stat = try file.stat();
-    const encrypted_size = stat.size - nonce.len - salt.len;
+    const encrypted_size = stat.size - nonce.len - salt.len - marker.len - 20; // 8 for marker + 20 for header
     if (encrypted_size == 0) {
-        return BackupMetadata.init(allocator);
+        // 如果没有加密数据，创建只有基本信息的元数据
+        var empty_metadata = BackupMetadata.init(allocator);
+        empty_metadata.version = version;
+        empty_metadata.timestamp = timestamp;
+        return empty_metadata;
+    }
+
+    // 添加安全检查，防止非法的文件数量
+    if (files_count > 100000) {
+        return error.InvalidMetadataFile;
     }
 
     const encrypted_buffer = try allocator.alloc(u8, encrypted_size);
@@ -312,46 +346,6 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     var metadata = BackupMetadata.init(allocator);
     var stream = std.io.fixedBufferStream(decrypted_buffer);
     const reader = stream.reader();
-
-    // Verify metadata header marker
-    var marker: [8]u8 = undefined;
-    _ = try reader.read(&marker);
-    const expected_marker = [_]u8{ 'C', 'R', 'Y', 'P', 'T', 'B', 'A', 'K' };
-    if (!std.mem.eql(u8, &marker, &expected_marker)) {
-        std.debug.print("Invalid metadata header marker\n", .{});
-        return error.InvalidMetadataFile;
-    }
-    std.debug.print("Metadata: Valid header marker found\n", .{});
-
-    var version_bytes: [4]u8 = undefined;
-    _ = try reader.read(&version_bytes);
-    metadata.version = std.mem.readInt(u32, &version_bytes, .little);
-
-    std.debug.print("Metadata: Version = {d}\n", .{metadata.version});
-
-    var timestamp_bytes: [8]u8 = undefined;
-    _ = try reader.read(&timestamp_bytes);
-    metadata.timestamp = std.mem.readInt(i64, &timestamp_bytes, .little);
-
-    std.debug.print("Metadata: Timestamp = {d}\n", .{metadata.timestamp});
-
-    var files_count_bytes: [8]u8 = undefined;
-    _ = try reader.read(&files_count_bytes);
-    const files_count = std.mem.readInt(u64, &files_count_bytes, .little);
-
-    std.debug.print("Metadata: Reading files_count = {d}\n", .{files_count});
-
-    // Debug the raw bytes too
-    std.debug.print("Metadata: files_count raw bytes = [ ", .{});
-    for (files_count_bytes) |b| {
-        std.debug.print("{d} ", .{b});
-    }
-    std.debug.print("]\n", .{});
-
-    // 添加安全检查，防止非法的文件数量
-    if (files_count > 100000) {
-        return error.InvalidMetadataFile;
-    }
 
     // 预先为 ArrayList 分配足够的容量
     try metadata.files.ensureTotalCapacity(files_count);
@@ -393,6 +387,9 @@ fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !Back
     if (metadata.files.items.len != files_count) {
         return error.InvalidMetadataFile;
     }
+
+    metadata.version = version;
+    metadata.timestamp = timestamp;
 
     return metadata;
 }
