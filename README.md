@@ -12,6 +12,25 @@ This project is developed with the help of [Windsurf](https://www.windsurfrs.com
 - Decrypt and restore functionality
 - Support for empty directories and complex directory structures
 - Comprehensive file metadata handling
+- Enhanced privacy with filename hashing
+
+## Changelog
+
+### v0.1.0 (2025-04-20)
+
+- **Enhanced Security**: All encrypted files are now stored in a `content` subfolder in the backup directory
+- **Privacy Protection**: Using MD5 hash of original file paths as encrypted filenames to prevent leaking original names
+- **Hidden Directory Structure**: No longer creating original directory structure in backup, all structure info is only saved in encrypted metadata
+- **Improved Restore Process**: Decryption first creates the complete directory structure from metadata, then decrypts files
+- **Strict Privacy Protection**: Backup directory doesn't contain any identifiable original file or directory information
+
+### v0.0.1
+
+- Initial release
+- Basic file encryption backup functionality
+- Incremental backup support
+- Password-derived key support
+- Decrypt and restore functionality
 
 ## Requirements
 
@@ -50,10 +69,12 @@ The compiled executable will be located at `./zig-out/bin/cryptbak`.
    - Only encrypts new or modified files
    - Removes files from backup that no longer exist in source
    - Updates metadata
+   - Stores encrypted files in the `content` directory using MD5 hash of original paths as filenames
 
 2. **Decryption Mode**:
    - Reads metadata from the encrypted folder
-   - Decrypts all files to the target folder
+   - First creates all directory structures according to metadata
+   - Retrieves encrypted files from `content` directory and decrypts them to their original locations
    - Recreates the original directory structure, including empty directories
 
 3. **Metadata**:
@@ -69,6 +90,9 @@ The compiled executable will be located at `./zig-out/bin/cryptbak`.
 - Keys are derived from passwords using PBKDF2 algorithm
 - Each file is encrypted with a unique random nonce
 - Includes cryptographic validation markers
+- No original filenames are exposed in the backup (filenames are hashed using MD5)
+- Directory structure is completely hidden, with all files stored flat in a content folder
+- All structural information is only available in the encrypted metadata
 
 ## Testing
 
