@@ -38,7 +38,7 @@ pub const BackupMetadata = struct {
 };
 
 pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []const u8, key: [32]u8) !void {
-    // 生成用于元数据加密的nonce
+    // Generate nonce for metadata encryption
     var metadata_nonce = crypto_utils.generateRandomSalt()[0..12].*;
 
     const metadata_path = try fs.path.join(allocator, &[_][]const u8{ output_dir, ".cryptbak.meta" });
@@ -51,7 +51,7 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
     var buffer = ArrayList(u8).init(allocator);
     defer buffer.deinit();
 
-    // 生成salt但只使用前4个字节
+    // Generate full salt for key derivation
     var full_salt = crypto_utils.generateRandomSalt();
     var enc_key: [32]u8 = undefined;
     try crypto_utils.deriveCipherKey(key[0..], full_salt, &enc_key);
@@ -64,8 +64,8 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
     var header_buf: [32]u8 = undefined;
     std.mem.writeInt(u32, header_buf[0..4], metadata.version, .little);
     std.mem.writeInt(i64, header_buf[4..12], metadata.timestamp, .little);
-    std.mem.writeInt(u32, header_buf[12..16], @as(u32, @intCast(metadata.files.items.len)), .little);
-    @memcpy(header_buf[16..32], full_salt[0..]);
+    // File count is moved to the encrypted section for better security
+    @memcpy(header_buf[12..28], full_salt[0..]);
     try file.writeAll(&header_buf);
 
     // Debug output
@@ -85,6 +85,11 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
 
     // Serialize file metadata
     const writer = buffer.writer();
+
+    // Write file count
+    var files_count_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &files_count_bytes, @as(u32, @intCast(metadata.files.items.len)), .little);
+    try writer.writeAll(&files_count_bytes);
 
     for (metadata.files.items) |file_meta| {
         // Write path length
@@ -168,14 +173,12 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     // Parse metadata basic information
     const version = std.mem.readInt(u32, header_buf[0..4], .little);
     const timestamp = std.mem.readInt(i64, header_buf[4..12], .little);
-    const files_count = std.mem.readInt(u32, header_buf[12..16], .little);
     var full_salt: [16]u8 = undefined;
-    @memcpy(full_salt[0..], header_buf[16..32]);
+    @memcpy(full_salt[0..], header_buf[12..28]);
 
     debugPrint("Metadata: Version = {d}\n", .{version});
     debugPrint("Metadata: Timestamp = {d}\n", .{timestamp});
-    debugPrint("Metadata: Files count = {d}\n", .{files_count});
-    
+
     var metadata = BackupMetadata{
         .version = version,
         .timestamp = timestamp,
@@ -248,6 +251,21 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     var stream = std.io.fixedBufferStream(decrypted_buffer);
     const reader = stream.reader();
 
+    // Read file count
+    var files_count_bytes: [4]u8 = undefined;
+    const files_count_read = reader.read(&files_count_bytes) catch |err| {
+        debugPrint("Error reading files count: {any}\n", .{err});
+        return error.InvalidMetadataFile;
+    };
+
+    if (files_count_read != files_count_bytes.len) {
+        debugPrint("Incomplete files count read: got {d} of {d} bytes\n", .{ files_count_read, files_count_bytes.len });
+        return error.InvalidMetadataFile;
+    }
+
+    const files_count = std.mem.readInt(u32, &files_count_bytes, .little);
+    debugPrint("Metadata: Files count = {d} (decrypted)\n", .{files_count});
+
     // Read and add all file metadata
     for (0..files_count) |i| {
         var path_len_bytes: [8]u8 = undefined;
@@ -257,8 +275,7 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
         };
 
         if (path_len_read != path_len_bytes.len) {
-            debugPrint("Incomplete path_len read for file {d}: got {d} of {d} bytes\n", 
-                .{ i, path_len_read, path_len_bytes.len });
+            debugPrint("Incomplete path_len read for file {d}: got {d} of {d} bytes\n", .{ i, path_len_read, path_len_bytes.len });
             return error.InvalidMetadataFile;
         }
 
@@ -292,8 +309,7 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
         };
 
         if (modified_read != modified_bytes.len) {
-            debugPrint("Incomplete modified_time read for file {d}: got {d} of {d} bytes\n", 
-                .{ i, modified_read, modified_bytes.len });
+            debugPrint("Incomplete modified_time read for file {d}: got {d} of {d} bytes\n", .{ i, modified_read, modified_bytes.len });
             allocator.free(path);
             return error.InvalidMetadataFile;
         }
@@ -309,8 +325,7 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
         };
 
         if (size_read != size_bytes.len) {
-            debugPrint("Incomplete size read for file {d}: got {d} of {d} bytes\n", 
-                .{ i, size_read, size_bytes.len });
+            debugPrint("Incomplete size read for file {d}: got {d} of {d} bytes\n", .{ i, size_read, size_bytes.len });
             allocator.free(path);
             return error.InvalidMetadataFile;
         }
@@ -325,8 +340,7 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
         };
 
         if (hash_read != hash.len) {
-            debugPrint("Incomplete hash read for file {d}: got {d} of {d} bytes\n", 
-                .{ i, hash_read, hash.len });
+            debugPrint("Incomplete hash read for file {d}: got {d} of {d} bytes\n", .{ i, hash_read, hash.len });
             allocator.free(path);
             return error.InvalidMetadataFile;
         }
