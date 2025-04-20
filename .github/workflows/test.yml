@@ -1,0 +1,33 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [  master ]
+  pull_request:
+    branches: [  master ]
+
+jobs:
+  test:
+    name: Run Unit and Integration Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Build Project
+        run: zig build
+
+      - name: Make test script executable
+        run: chmod +x ./test.sh
+
+      - name: Run Tests
+        run: ./test.sh

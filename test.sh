@@ -253,15 +253,56 @@ test_incremental_backup() {
     return 0
 }
 
+# 运行Zig单元测试
+run_unit_tests() {
+    echo -e "\n${YELLOW}运行Zig单元测试...${NC}"
+    
+    # 测试所有模块
+    if ! zig test src/metadata.zig; then
+        echo -e "${RED}metadata.zig 单元测试失败${NC}"
+        return 1
+    fi
+    
+    if ! zig test src/crypto_utils.zig; then
+        echo -e "${RED}crypto_utils.zig 单元测试失败${NC}"
+        return 1
+    fi
+    
+    if ! zig test src/fs_utils.zig; then
+        echo -e "${RED}fs_utils.zig 单元测试失败${NC}"
+        return 1
+    fi
+    
+    if ! zig test src/config.zig; then
+        echo -e "${RED}config.zig 单元测试失败${NC}"
+        return 1
+    fi
+    
+    if ! zig test src/backup.zig; then
+        echo -e "${RED}backup.zig 单元测试失败${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}所有单元测试通过!${NC}"
+    return 0
+}
+
 # 运行所有测试
 run_all_tests() {
+    # 首先运行单元测试
+    run_unit_tests || {
+        echo -e "${RED}单元测试失败，跳过集成测试${NC}"
+        return 1
+    }
+    
+    # 然后运行集成测试
     setup_test_environment
     
-    test_simple_encryption || true
+    test_simple_encryption
     
-    test_simple_decryption || true
+    test_simple_decryption
     
-    test_incremental_backup || true
+    test_incremental_backup
     
     echo -e "\n${GREEN}测试完成!${NC}"
     return 0

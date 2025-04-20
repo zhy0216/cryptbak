@@ -375,3 +375,149 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
 
     return metadata;
 }
+
+// Unit tests for metadata functionality
+test "metadata serialization and deserialization" {
+    const testing = std.testing;
+    var allocator = testing.allocator;
+    
+    // Create a temporary directory for testing
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    
+    // Get the path to the temporary directory
+    const tmp_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+    
+    // Create test metadata
+    var metadata = BackupMetadata.init(allocator);
+    defer metadata.deinit();
+    
+    // Add a few test files
+    const test_path1 = try allocator.dupe(u8, "test_file1.txt");
+    try metadata.files.append(FileMetadata{
+        .path = test_path1,
+        .last_modified = 123456789,
+        .size = 1024,
+        .hash = [_]u8{1} ** 32,
+        .is_directory = false,
+    });
+    
+    const test_path2 = try allocator.dupe(u8, "test_directory");
+    try metadata.files.append(FileMetadata{
+        .path = test_path2,
+        .last_modified = 987654321,
+        .size = 0,
+        .hash = [_]u8{0} ** 32,
+        .is_directory = true,
+    });
+    
+    // Set a test password
+    const test_password = "test_password";
+    var key: [32]u8 = undefined;
+    var initial_salt: [16]u8 = undefined;
+    @memset(&initial_salt, 0);
+    try crypto_utils.deriveCipherKey(test_password, initial_salt, &key);
+    
+    // Save metadata to the temp directory
+    try saveMetadata(allocator, metadata, tmp_path, key);
+    
+    // Load back the metadata
+    var loaded_metadata = try loadMetadata(allocator, tmp_path, key);
+    defer loaded_metadata.deinit();
+    
+    // Verify the loaded metadata
+    try testing.expectEqual(metadata.version, loaded_metadata.version);
+    try testing.expectEqual(metadata.timestamp, loaded_metadata.timestamp);
+    try testing.expectEqual(metadata.files.items.len, loaded_metadata.files.items.len);
+    
+    // Check if files match
+    for (metadata.files.items, 0..) |file, i| {
+        const loaded_file = loaded_metadata.files.items[i];
+        try testing.expectEqualStrings(file.path, loaded_file.path);
+        try testing.expectEqual(file.last_modified, loaded_file.last_modified);
+        try testing.expectEqual(file.size, loaded_file.size);
+        try testing.expectEqualSlices(u8, &file.hash, &loaded_file.hash);
+        try testing.expectEqual(file.is_directory, loaded_file.is_directory);
+    }
+}
+
+test "metadata with empty file list" {
+    const testing = std.testing;
+    var allocator = testing.allocator;
+    
+    // Create a temporary directory for testing
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    
+    // Get the path to the temporary directory
+    const tmp_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+    
+    // Create empty metadata
+    var metadata = BackupMetadata.init(allocator);
+    defer metadata.deinit();
+    
+    // Set a test password
+    const test_password = "test_password";
+    var key: [32]u8 = undefined;
+    var initial_salt: [16]u8 = undefined;
+    @memset(&initial_salt, 0);
+    try crypto_utils.deriveCipherKey(test_password, initial_salt, &key);
+    
+    // Save metadata to the temp directory
+    try saveMetadata(allocator, metadata, tmp_path, key);
+    
+    // Load back the metadata
+    var loaded_metadata = try loadMetadata(allocator, tmp_path, key);
+    defer loaded_metadata.deinit();
+    
+    // Verify the loaded metadata
+    try testing.expectEqual(metadata.version, loaded_metadata.version);
+    try testing.expectEqual(metadata.timestamp, loaded_metadata.timestamp);
+    try testing.expectEqual(@as(usize, 0), loaded_metadata.files.items.len);
+}
+
+test "metadata with special characters in file paths" {
+    const testing = std.testing;
+    var allocator = testing.allocator;
+    
+    // Create a temporary directory for testing
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    
+    // Get the path to the temporary directory
+    const tmp_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+    
+    // Create test metadata
+    var metadata = BackupMetadata.init(allocator);
+    defer metadata.deinit();
+    
+    // Add a file with special characters in the path
+    const special_path = try allocator.dupe(u8, "路径/with spaces and 特殊字符.txt");
+    try metadata.files.append(FileMetadata{
+        .path = special_path,
+        .last_modified = 123456789,
+        .size = 1024,
+        .hash = [_]u8{1} ** 32,
+        .is_directory = false,
+    });
+    
+    // Set a test password
+    const test_password = "test_password";
+    var key: [32]u8 = undefined;
+    var initial_salt: [16]u8 = undefined;
+    @memset(&initial_salt, 0);
+    try crypto_utils.deriveCipherKey(test_password, initial_salt, &key);
+    
+    // Save metadata to the temp directory
+    try saveMetadata(allocator, metadata, tmp_path, key);
+    
+    // Load back the metadata
+    var loaded_metadata = try loadMetadata(allocator, tmp_path, key);
+    defer loaded_metadata.deinit();
+    
+    // Verify the special path was preserved
+    try testing.expectEqualStrings(special_path, loaded_metadata.files.items[0].path);
+}
