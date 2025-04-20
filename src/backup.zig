@@ -53,11 +53,11 @@ pub fn processBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
             continue;
         }
 
-        // For files, create a hashed filename and store in content directory
-        const hashed_name = try crypto_utils.getHashedPath(allocator, file.path);
-        defer allocator.free(hashed_name);
-        
-        const dest_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, hashed_name });
+        // For files, create a content-based hashed filename and store in content directory
+        const content_hashed_name = try crypto_utils.getContentHashedPath(allocator, file.hash);
+        defer allocator.free(content_hashed_name);
+
+        const dest_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hashed_name });
         defer allocator.free(dest_path);
 
         const existing = existing_files_map.get(file.path);
@@ -117,18 +117,61 @@ pub fn processBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
         }
     }
 
-    for (files_to_remove.items) |file| {
-        // For files to remove, we need to remove them from the content directory using the hashed name
-        const hashed_name = try crypto_utils.getHashedPath(allocator, file);
-        defer allocator.free(hashed_name);
-        
-        const full_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, hashed_name });
-        defer allocator.free(full_path);
+    // Create a map to track which content hashes are still in use
+    var content_hash_map = StringHashMap(u32).init(allocator);
+    defer content_hash_map.deinit();
 
-        debugPrint("Removing deleted file: {s}\n", .{file});
-        fs.cwd().deleteFile(full_path) catch |err| {
-            debugPrint("Warning: Could not delete {s}: {any}\n", .{ full_path, err });
-        };
+    // Count references to each content hash in the new metadata
+    for (new_metadata.files.items) |file| {
+        if (file.is_directory) continue;
+
+        const content_hash = try crypto_utils.getContentHashedPath(allocator, file.hash);
+
+        const entry = content_hash_map.getEntry(content_hash);
+        if (entry) |e| {
+            // Increment reference count
+            const new_count = e.value_ptr.* + 1;
+            allocator.free(content_hash); // Free this copy since we already have the key
+            try content_hash_map.put(e.key_ptr.*, new_count);
+        } else {
+            // First reference to this hash - we transfer ownership of content_hash to the map
+            try content_hash_map.put(content_hash, 1);
+        }
+    }
+
+    // Process files to remove
+    for (files_to_remove.items) |file| {
+        debugPrint("Checking if we can remove deleted file: {s}\n", .{file});
+
+        // Get the file's metadata from the existing metadata
+        const existing_file = existing_files_map.get(file) orelse continue;
+
+        // Get content hash for this file
+        const content_hash = try crypto_utils.getContentHashedPath(allocator, existing_file.hash);
+        defer allocator.free(content_hash);
+
+        // Check if any other files are using this content hash
+        // Note: We need to check if this hash exists in the map
+        const ref_count = content_hash_map.get(content_hash) orelse 0;
+
+        if (ref_count == 0) {
+            // No references to this content hash, safe to delete
+            const full_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hash });
+            defer allocator.free(full_path);
+
+            debugPrint("Removing deleted file (no other references): {s}\n", .{file});
+            fs.cwd().deleteFile(full_path) catch |err| {
+                debugPrint("Warning: Could not delete {s}: {any}\n", .{ full_path, err });
+            };
+        } else {
+            debugPrint("Keeping backup file for deleted {s} as it's referenced by {d} other file(s)\n", .{ file, ref_count });
+        }
+    }
+
+    // Free the hash map keys - we own these strings
+    var hash_iter = content_hash_map.keyIterator();
+    while (hash_iter.next()) |hash_key| {
+        allocator.free(hash_key.*);
     }
 
     // Save new metadata
@@ -161,7 +204,7 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
         if (file.is_directory) {
             const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
             defer allocator.free(dest_path);
-            
+
             debugPrint("Creating directory from metadata: {s}\n", .{file.path});
             try fs.cwd().makePath(dest_path);
         }
@@ -177,11 +220,11 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
         const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
         defer allocator.free(dest_path);
 
-        // For files, get the hashed name and decrypt from content directory
-        const hashed_name = try crypto_utils.getHashedPath(allocator, file.path);
-        defer allocator.free(hashed_name);
-        
-        const source_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, hashed_name });
+        // For files, get the content-based hashed name and decrypt from content directory
+        const content_hashed_name = try crypto_utils.getContentHashedPath(allocator, file.hash);
+        defer allocator.free(content_hashed_name);
+
+        const source_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hashed_name });
         defer allocator.free(source_path);
 
         // Ensure parent directories exist

@@ -100,18 +100,22 @@ pub fn decryptFile(source_path: []const u8, dest_path: []const u8, key: [32]u8) 
 pub fn calculateMd5ForFilename(filename: []const u8) [32]u8 {
     var hash = crypto.hash.Md5.init(.{});
     hash.update(filename);
-    
+
     var digest: [16]u8 = undefined;
     hash.final(&digest);
-    
+
     // Convert to hex string and then to a fixed-size byte array
     var hex_digest: [32]u8 = undefined;
     _ = std.fmt.bufPrint(&hex_digest, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
-    
+
     return hex_digest;
 }
 
 pub fn getHashedPath(allocator: std.mem.Allocator, original_path: []const u8) ![]const u8 {
     const md5_hash = calculateMd5ForFilename(original_path);
     return std.fmt.allocPrint(allocator, "{s}", .{md5_hash});
+}
+
+pub fn getContentHashedPath(allocator: std.mem.Allocator, content_hash: [32]u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&content_hash)});
 }

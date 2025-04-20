@@ -8,6 +8,7 @@ This project is developed with the help of [Windsurf](https://www.windsurfrs.com
 
 - Securely encrypt your backup files
 - Incremental backups (only encrypt new or modified files)
+- Content-based deduplication (identical files are backed up only once)
 - Secure password-derived keys
 - Decrypt and restore functionality
 - Support for empty directories and complex directory structures
@@ -16,7 +17,12 @@ This project is developed with the help of [Windsurf](https://www.windsurfrs.com
 
 ## Changelog
 
-### v0.1.0 (2025-04-20)
+### v0.0.3 
+
+- **Content-based Deduplication**: Using SHA-256 hash of file contents as backup filenames, automatically deduplicating identical files
+- **Smart Deletion**: Checking for other files referencing the same content before deleting backup files
+
+### v0.0.2 
 
 - **Enhanced Security**: All encrypted files are now stored in a `content` subfolder in the backup directory
 - **Privacy Protection**: Using MD5 hash of original file paths as encrypted filenames to prevent leaking original names
@@ -64,12 +70,13 @@ The compiled executable will be located at `./zig-out/bin/cryptbak`.
 
 1. **Encryption Mode**:
    - Scans all files in the source folder
-   - Calculates a hash value for each file
+   - Calculates a SHA-256 hash value for each file
    - Compares with previous backup metadata (if exists)
    - Only encrypts new or modified files
-   - Removes files from backup that no longer exist in source
+   - Uses file content hash as backup filename, automatically deduplicating identical files
+   - Checks if other files reference the same content before deleting backup files
    - Updates metadata
-   - Stores encrypted files in the `content` directory using MD5 hash of original paths as filenames
+   - Stores encrypted files in the `content` directory using content hash as filenames
 
 2. **Decryption Mode**:
    - Reads metadata from the encrypted folder
