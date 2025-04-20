@@ -376,6 +376,21 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     return metadata;
 }
 
+pub fn findOriginalPathByHash(metadata: BackupMetadata, allocator: Allocator, hash_value: []const u8) !?[]const u8 {
+    for (metadata.files.items) |file| {
+        if (file.is_directory) continue;
+        
+        const file_hash = try crypto_utils.getHashedPath(allocator, file.path);
+        defer allocator.free(file_hash);
+        
+        if (std.mem.eql(u8, file_hash, hash_value)) {
+            return try allocator.dupe(u8, file.path);
+        }
+    }
+    
+    return null;
+}
+
 // Unit tests for metadata functionality
 test "metadata serialization and deserialization" {
     const testing = std.testing;

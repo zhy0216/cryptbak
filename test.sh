@@ -79,45 +79,24 @@ test_simple_encryption() {
     echo "运行加密..."
     run_cmd "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -p "$TEST_PASSWORD" || return 1
     
-    # 检查备份目录中是否有加密文件
-    if [ ! -f "$BACKUP_DIR/simple_file.txt" ]; then
-        echo -e "${RED}失败: 加密文件不存在${NC}"
+    # 检查备份目录中的content子目录是否存在
+    if [ ! -d "$BACKUP_DIR/content" ]; then
+        echo -e "${RED}失败: content子目录不存在${NC}"
         return 1
     fi
     
-    # 检查多层级文件是否都被加密
-    if [ ! -f "$BACKUP_DIR/level1/level2/level3/file3.txt" ]; then
-        echo -e "${RED}失败: 多层级文件未被正确加密${NC}"
+    # 检查content目录中的文件数量是否与源目录一致（不包括目录）
+    local source_files_count=$(find "$SOURCE_DIR" -type f | wc -l)
+    local content_files_count=$(find "$BACKUP_DIR/content" -type f | wc -l)
+    
+    if [ "$source_files_count" -ne "$content_files_count" ]; then
+        echo -e "${RED}失败: 源目录文件数量($source_files_count)与content目录中的文件数量($content_files_count)不一致${NC}"
         return 1
     fi
     
-    # 检查特殊文件名是否被正确加密
-    if [ ! -f "$BACKUP_DIR/file with spaces.txt" ]; then
-        echo -e "${RED}失败: 包含空格的文件名未被正确加密${NC}"
-        return 1
-    fi
-    
-    # 检查大文件是否被正确加密
-    if [ ! -f "$BACKUP_DIR/large_file.bin" ]; then
-        echo -e "${RED}失败: 大文件未被正确加密${NC}"
-        return 1
-    fi
-    
-    # 检查是否有足够数量的小文件被加密
-    small_files_count=$(find "$BACKUP_DIR/many_files" -type f | wc -l)
-    if [ "$small_files_count" -lt 100 ]; then
-        echo -e "${RED}失败: 小文件集合未被完全加密，期望100个，实际$small_files_count个${NC}"
-        return 1
-    fi
-    
-    # 检查空文件和空目录
-    if [ ! -f "$BACKUP_DIR/empty_file.txt" ]; then
-        echo -e "${RED}失败: 空文件未被正确加密${NC}"
-        return 1
-    fi
-    
-    if [ ! -d "$BACKUP_DIR/empty_dir" ]; then
-        echo -e "${RED}失败: 空目录未被正确创建${NC}"
+    # 检查metadata文件是否存在
+    if [ ! -f "$BACKUP_DIR/.cryptbak.meta" ]; then
+        echo -e "${RED}失败: metadata文件不存在${NC}"
         return 1
     fi
     
@@ -226,26 +205,43 @@ test_incremental_backup() {
     echo "运行增量备份..."
     run_cmd "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -p "$TEST_PASSWORD" || return 1
     
-    # 检查修改的文件是否被更新
-    if ! [ -f "$BACKUP_DIR/simple_file.txt" ]; then
-        echo -e "${RED}失败: 修改后的文件不存在${NC}"
+    # 检查新增文件是否被备份（通过检查文件数量）
+    local source_files_count=$(find "$SOURCE_DIR" -type f | wc -l)
+    local content_files_count=$(find "$BACKUP_DIR/content" -type f | wc -l)
+    
+    if [ "$source_files_count" -ne "$content_files_count" ]; then
+        echo -e "${RED}失败: 增量备份后, 源目录文件数量($source_files_count)与content目录中的文件数量($content_files_count)不一致${NC}"
         return 1
     fi
     
-    # 检查新增文件是否被备份
-    if ! [ -f "$BACKUP_DIR/new_file.txt" ]; then
-        echo -e "${RED}失败: 新增文件未被备份${NC}"
+    # 解密测试, 确保修改的文件能正确解密
+    rm -rf "$RESTORE_DIR"
+    mkdir -p "$RESTORE_DIR"
+    
+    "$CRYPTBAK_BIN" "$BACKUP_DIR" "$RESTORE_DIR" -d -p "$TEST_PASSWORD" > /tmp/decrypt_output.log 2>&1
+    local result=$?
+    
+    if [ $result -ne 0 ]; then
+        echo -e "${RED}增量备份后解密失败，错误代码: $result${NC}"
+        cat /tmp/decrypt_output.log
         return 1
     fi
     
-    if ! [ -f "$BACKUP_DIR/new_dir/new_dir_file.txt" ]; then
-        echo -e "${RED}失败: 新增目录中的文件未被备份${NC}"
+    # 检查修改的文件是否被正确恢复
+    if ! grep -q "这是修改后的文件内容" "$RESTORE_DIR/simple_file.txt"; then
+        echo -e "${RED}失败: 修改后的文件内容未被正确恢复${NC}"
+        return 1
+    fi
+    
+    # 检查新增加的文件是否正确恢复
+    if [ ! -f "$RESTORE_DIR/new_file.txt" ]; then
+        echo -e "${RED}失败: 新增文件未被正确恢复${NC}"
         return 1
     fi
     
     # 检查删除的文件是否也从备份中删除
-    if [ -f "$BACKUP_DIR/level1/file1.txt" ]; then
-        echo -e "${RED}失败: 删除的文件仍然存在于备份中${NC}"
+    if [ -f "$RESTORE_DIR/level1/file1.txt" ]; then
+        echo -e "${RED}失败: 删除的文件仍然存在于恢复目录中${NC}"
         return 1
     fi
     

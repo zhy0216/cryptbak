@@ -1,5 +1,5 @@
 # CryptBak
-[中文](README_CN.md).
+[中文](README_CN.md)
 
 A simple file encryption backup tool written in [Zig](https://ziglang.org/).
 

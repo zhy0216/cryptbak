@@ -36,21 +36,33 @@ pub fn processBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
     var new_metadata = BackupMetadata.init(allocator);
     defer new_metadata.deinit();
 
+    // Ensure the content directory exists
+    const content_dir = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, "content" });
+    defer allocator.free(content_dir);
+    try fs.cwd().makePath(content_dir);
+
     // Process each file: only encrypt if changed or new
     for (current_files.items) |file| {
-        const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
-        defer allocator.free(dest_path);
-
         const source_path = try fs.path.join(allocator, &[_][]const u8{ conf.source_dir, file.path });
         defer allocator.free(source_path);
 
-        // If it's a directory, just create it
+        // If it's a directory, just create it (outside the content folder, preserving structure)
         if (file.is_directory) {
+            const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
+            defer allocator.free(dest_path);
+            
             debugPrint("Creating empty directory: {s}\n", .{file.path});
             try fs.cwd().makePath(dest_path);
             try new_metadata.files.append(file);
             continue;
         }
+
+        // For files, create a hashed filename and store in content directory
+        const hashed_name = try crypto_utils.getHashedPath(allocator, file.path);
+        defer allocator.free(hashed_name);
+        
+        const dest_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, hashed_name });
+        defer allocator.free(dest_path);
 
         const existing = existing_files_map.get(file.path);
         const needs_update = blk: {
@@ -110,7 +122,11 @@ pub fn processBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
     }
 
     for (files_to_remove.items) |file| {
-        const full_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file });
+        // For files to remove, we need to remove them from the content directory using the hashed name
+        const hashed_name = try crypto_utils.getHashedPath(allocator, file);
+        defer allocator.free(hashed_name);
+        
+        const full_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, hashed_name });
         defer allocator.free(full_path);
 
         debugPrint("Removing deleted file: {s}\n", .{file});
@@ -140,11 +156,12 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
     var meta = try metadata.loadMetadata(allocator, conf.source_dir, key);
     defer meta.deinit();
 
+    // Get content directory path
+    const content_dir = try fs.path.join(allocator, &[_][]const u8{ conf.source_dir, "content" });
+    defer allocator.free(content_dir);
+
     // Process each file in the metadata
     for (meta.files.items) |file| {
-        const source_path = try fs.path.join(allocator, &[_][]const u8{ conf.source_dir, file.path });
-        defer allocator.free(source_path);
-
         const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
         defer allocator.free(dest_path);
 
@@ -154,6 +171,13 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
             try fs.cwd().makePath(dest_path);
             continue;
         }
+
+        // For files, get the hashed name and decrypt from content directory
+        const hashed_name = try crypto_utils.getHashedPath(allocator, file.path);
+        defer allocator.free(hashed_name);
+        
+        const source_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, hashed_name });
+        defer allocator.free(source_path);
 
         // Ensure parent directories exist
         const dest_dir = fs.path.dirname(dest_path) orelse "";
