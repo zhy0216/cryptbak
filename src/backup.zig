@@ -46,13 +46,9 @@ pub fn processBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
         const source_path = try fs.path.join(allocator, &[_][]const u8{ conf.source_dir, file.path });
         defer allocator.free(source_path);
 
-        // If it's a directory, just create it (outside the content folder, preserving structure)
+        // If it's a directory, don't create it in the backup structure, just record in metadata
         if (file.is_directory) {
-            const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
-            defer allocator.free(dest_path);
-            
-            debugPrint("Creating empty directory: {s}\n", .{file.path});
-            try fs.cwd().makePath(dest_path);
+            debugPrint("Recording directory in metadata (not creating in backup): {s}\n", .{file.path});
             try new_metadata.files.append(file);
             continue;
         }
@@ -160,17 +156,26 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
     const content_dir = try fs.path.join(allocator, &[_][]const u8{ conf.source_dir, "content" });
     defer allocator.free(content_dir);
 
-    // Process each file in the metadata
+    // First, create all directory structures from metadata
     for (meta.files.items) |file| {
-        const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
-        defer allocator.free(dest_path);
-
-        // If it's a directory, just create the directory
         if (file.is_directory) {
-            debugPrint("Creating empty directory: {s}\n", .{file.path});
+            const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
+            defer allocator.free(dest_path);
+            
+            debugPrint("Creating directory from metadata: {s}\n", .{file.path});
             try fs.cwd().makePath(dest_path);
+        }
+    }
+
+    // Then process each file in the metadata
+    for (meta.files.items) |file| {
+        // Skip directories as we've already created them
+        if (file.is_directory) {
             continue;
         }
+
+        const dest_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, file.path });
+        defer allocator.free(dest_path);
 
         // For files, get the hashed name and decrypt from content directory
         const hashed_name = try crypto_utils.getHashedPath(allocator, file.path);
