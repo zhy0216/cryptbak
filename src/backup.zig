@@ -405,8 +405,8 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
     var changed_paths = StringHashMap(void).init(allocator);
     defer {
         var it = changed_paths.keyIterator();
-        while (it.next()) |key| {
-            allocator.free(key.*);
+        while (it.next()) |path_key| {
+            allocator.free(path_key.*);
         }
         changed_paths.deinit();
     }
@@ -535,7 +535,7 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
 
 // Helper function to check if a file's parent directory is in the changed paths set
 fn hasParentInSet(changed_paths: *const StringHashMap(void), path: []const u8) bool {
-    var parent_path = fs.path.dirname(path) orelse return false;
+    const parent_path = fs.path.dirname(path) orelse return false;
     if (parent_path.len == 0) return false;
     
     return changed_paths.contains(parent_path);

@@ -296,18 +296,9 @@ pub const FSWatcher = struct {
         const NOTE_RENAME = 0x0020;
         const NOTE_ATTRIB = 0x0008;
         
-        // Add directory to watch list
-        const Kevent = extern struct {
-            ident: usize,
-            filter: i16,
-            flags: u16,
-            fflags: u32,
-            data: i64,
-            udata: usize,
-        };
-        
-        var changelist = [_]Kevent{
-            Kevent{
+        // Use system Kevent type
+        var changelist = [_]std.c.Kevent{
+            std.c.Kevent{
                 .ident = @intCast(dir.fd),
                 .filter = EVFILT_VNODE,
                 .flags = EV_ADD | EV_CLEAR,
@@ -317,7 +308,10 @@ pub const FSWatcher = struct {
             },
         };
         
-        const result = std.c.kevent(self.kq, &changelist, changelist.len, null, 0, null);
+        // Create an empty eventlist for receiving events (not needed for registration)
+        var eventlist = [_]std.c.Kevent{};
+        
+        const result = std.c.kevent(self.kq, &changelist, changelist.len, &eventlist, 0, null);
         if (result < 0) {
             debugPrint("Failed to register kqueue events\n", .{});
             return error.KqueueRegisterFailed;
@@ -330,31 +324,14 @@ pub const FSWatcher = struct {
     }
 
     fn pollKqueue(self: *FSWatcher) !bool {
-        // Define constants for kqueue
-        const EVFILT_VNODE = -4;
+        // Use system Kevent type
+        var eventlist = [_]std.c.Kevent{undefined};
         
-        // Define Kevent struct for kqueue
-        const Kevent = extern struct {
-            ident: usize,
-            filter: i16,
-            flags: u16,
-            fflags: u32,
-            data: i64,
-            udata: usize,
-        };
+        // Create an empty changelist since we don't want to register new events
+        var changelist = [_]std.c.Kevent{};
         
-        var eventlist = [_]Kevent{undefined};
-        
-        // Define timespec struct
-        const timespec = extern struct {
-            tv_sec: isize,
-            tv_nsec: isize,
-        };
-        
-        var timeout = timespec{ .tv_sec = 0, .tv_nsec = 100000000 }; // 100ms
-        
-        // Check for events
-        const nevents = std.c.kevent(self.kq, null, 0, &eventlist, eventlist.len, &timeout);
+        // Check for events - use null for timeout to make it non-blocking
+        const nevents = std.c.kevent(self.kq, &changelist, 0, &eventlist, eventlist.len, null);
         if (nevents < 0) {
             debugPrint("Failed to poll kqueue events\n", .{});
             return false;
