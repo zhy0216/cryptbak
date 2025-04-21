@@ -368,15 +368,27 @@ run_all_tests() {
     # Then run integration tests
     setup_test_environment
 
-    test_simple_encryption
+    test_simple_encryption || {
+        echo -e "${RED}Simple encryption test failed, aborting tests${NC}"
+        return 1
+    }
 
-    test_simple_decryption
+    test_simple_decryption || {
+        echo -e "${RED}Simple decryption test failed, aborting tests${NC}"
+        return 1
+    }
 
-    test_incremental_backup
+    test_incremental_backup || {
+        echo -e "${RED}Incremental backup test failed, aborting tests${NC}"
+        return 1
+    }
     
-    test_watch_mode
+    test_watch_mode || {
+        echo -e "${RED}Watch mode test failed, aborting tests${NC}"
+        return 1
+    }
 
-    echo -e "\n${GREEN}Tests completed!${NC}"
+    echo -e "\n${GREEN}All tests completed successfully!${NC}"
     return 0
 }
 

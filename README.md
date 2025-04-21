@@ -17,6 +17,11 @@ This project is developed with the help of [Windsurf](https://www.windsurfrs.com
 
 ## Changelog
 
+### v0.0.4
+
+- **Watch Mode**: Added new watch mode (`-t`) to continuously monitor source directory for changes
+- **Minimum Backup Period**: Added support for configurable minimum time between backups (`--mt` option, default 90 seconds)
+
 ### v0.0.3 
 
 - **Content-based Deduplication**: Using SHA-256 hash of file contents as backup filenames, automatically deduplicating identical files
