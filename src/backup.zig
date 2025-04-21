@@ -269,6 +269,8 @@ pub fn doEncrypt(allocator: Allocator, conf: Config) !void {
     return processBackup(allocator, conf, key, existing_metadata);
 }
 
+const fs_watcher = @import("fs_watcher.zig");
+
 pub fn doWatch(allocator: Allocator, conf: Config) !void {
     debugPrint("Starting watch mode on {s}\n", .{conf.source_dir});
     debugPrint("Minimum backup period: {d} seconds\n", .{conf.min_backup_period});
@@ -280,53 +282,98 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
     var last_backup_time = std.time.milliTimestamp();
     var changes_detected = false;
     
-    while (true) {
-        // Store current metadata for comparison
-        var initial_salt: [16]u8 = undefined;
-        @memset(&initial_salt, 0); // Use all-zero salt for initialization
-        var key: [32]u8 = undefined;
-        try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
-        
-        var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
-            if (err == error.FileNotFound) {
-                var empty_metadata = BackupMetadata.init(allocator);
-                defer empty_metadata.deinit();
-                continue;
+    // Initialize file system watcher
+    debugPrint("Initializing file system watcher...\n", .{});
+    var watcher_result = try fs_watcher.createWatcher(allocator, conf.source_dir);
+    
+    // Start watching
+    switch (watcher_result) {
+        .FSWatcher => |*native_watcher| {
+            defer native_watcher.deinit();
+            try native_watcher.start();
+            debugPrint("Using native file system notifications\n", .{});
+            
+            while (true) {
+                // Check for file system events
+                changes_detected = try native_watcher.checkEvents();
+                
+                // If changes detected and minimum backup period has passed
+                const current_time = std.time.milliTimestamp();
+                const elapsed_ms = current_time - last_backup_time;
+                const min_period_ms = conf.min_backup_period * std.time.ms_per_s;
+                
+                if (changes_detected and elapsed_ms >= min_period_ms) {
+                    debugPrint("Changes detected, performing backup...\n", .{});
+                    try doEncrypt(allocator, conf);
+                    last_backup_time = std.time.milliTimestamp();
+                    changes_detected = false;
+                } else if (changes_detected) {
+                    debugPrint("Changes detected, but waiting for minimum backup period ({d} seconds)...\n", .{conf.min_backup_period});
+                    
+                    // Continue checking until minimum period has passed
+                    while (true) {
+                        std.time.sleep(std.time.ns_per_s); // 1 second sleep
+                        
+                        const check_time = std.time.milliTimestamp();
+                        const check_elapsed = check_time - last_backup_time;
+                        
+                        if (check_elapsed >= min_period_ms) {
+                            debugPrint("Minimum period reached, performing backup...\n", .{});
+                            try doEncrypt(allocator, conf);
+                            last_backup_time = std.time.milliTimestamp();
+                            changes_detected = false;
+                            break;
+                        }
+                    }
+                }
+                
+                // Small sleep to prevent high CPU usage
+                std.time.sleep(std.time.ns_per_s / 10); // 100ms sleep
             }
-            return err;
-        };
-        defer existing_metadata.deinit();
-        
-        // Wait a short time before checking for changes (to reduce CPU usage)
-        std.time.sleep(std.time.ns_per_s * 2); // 2 second polling interval
-        
-        // Scan current directory state
-        var current_files = ArrayList(FileMetadata).init(allocator);
-        defer {
-            for (current_files.items) |file| {
-                if (!file.is_directory) allocator.free(file.path);
+        },
+        .PollingFSWatcher => |*polling_watcher| {
+            defer polling_watcher.deinit();
+            try polling_watcher.start();
+            debugPrint("Using polling-based file system monitoring\n", .{});
+            
+            while (true) {
+                // Check for file system events
+                changes_detected = try polling_watcher.checkEvents();
+                
+                // If changes detected and minimum backup period has passed
+                const current_time = std.time.milliTimestamp();
+                const elapsed_ms = current_time - last_backup_time;
+                const min_period_ms = conf.min_backup_period * std.time.ms_per_s;
+                
+                if (changes_detected and elapsed_ms >= min_period_ms) {
+                    debugPrint("Changes detected, performing backup...\n", .{});
+                    try doEncrypt(allocator, conf);
+                    last_backup_time = std.time.milliTimestamp();
+                    changes_detected = false;
+                } else if (changes_detected) {
+                    debugPrint("Changes detected, but waiting for minimum backup period ({d} seconds)...\n", .{conf.min_backup_period});
+                    
+                    // Continue checking until minimum period has passed
+                    while (true) {
+                        std.time.sleep(std.time.ns_per_s); // 1 second sleep
+                        
+                        const check_time = std.time.milliTimestamp();
+                        const check_elapsed = check_time - last_backup_time;
+                        
+                        if (check_elapsed >= min_period_ms) {
+                            debugPrint("Minimum period reached, performing backup...\n", .{});
+                            try doEncrypt(allocator, conf);
+                            last_backup_time = std.time.milliTimestamp();
+                            changes_detected = false;
+                            break;
+                        }
+                    }
+                }
+                
+                // Small sleep to prevent high CPU usage
+                std.time.sleep(std.time.ns_per_s * 2); // 2 second polling interval
             }
-            current_files.deinit();
-        }
-        
-        try fs_utils.scanDirectory(allocator, conf.source_dir, conf.source_dir, &current_files);
-        
-        // Compare with previous state to detect changes
-        changes_detected = try detectChanges(allocator, &existing_metadata, &current_files);
-        
-        // If changes detected and minimum backup period has passed
-        const current_time = std.time.milliTimestamp();
-        const elapsed_ms = current_time - last_backup_time;
-        const min_period_ms = conf.min_backup_period * std.time.ms_per_s;
-        
-        if (changes_detected and elapsed_ms >= min_period_ms) {
-            debugPrint("Changes detected, performing backup...\n", .{});
-            try doEncrypt(allocator, conf);
-            last_backup_time = std.time.milliTimestamp();
-            changes_detected = false;
-        } else if (changes_detected) {
-            debugPrint("Changes detected, but waiting for minimum backup period ({d} seconds)...\n", .{conf.min_backup_period});
-        }
+        },
     }
 }
 
