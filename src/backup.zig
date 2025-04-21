@@ -56,12 +56,6 @@ pub fn performBackup(
 
     // Process each file: only encrypt if changed or new
     for (current_files.items) |file| {
-        // Special case for watch mode test
-        const is_test_file = std.mem.indexOf(u8, file.path, "watch_test_file.txt") != null;
-        if (is_test_file) {
-            debugPrint("Found watch test file: {s}\n", .{file.path});
-        }
-        
         const source_path = try fs.path.join(allocator, &[_][]const u8{ conf.source_dir, file.path });
         defer allocator.free(source_path);
 
@@ -87,12 +81,6 @@ pub fn performBackup(
             const existing_file = existing_file_opt.?;
             if (!std.mem.eql(u8, &existing_file.hash, &file.hash) or existing_file.size != file.size) {
                 debugPrint("Changed file: {s}\n", .{file.path});
-                break :blk true;
-            }
-
-            // Always update test files in watch test mode
-            if (is_test_file) {
-                debugPrint("Test file, forcing update: {s}\n", .{file.path});
                 break :blk true;
             }
 

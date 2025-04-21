@@ -46,12 +46,12 @@ pub const FSWatcher = struct {
     pub fn deinit(self: *FSWatcher) void {
         self.deinitPlatformSpecific();
         self.allocator.free(self.path);
-        
+
         for (self.events.items) |event| {
             self.allocator.free(event.path);
         }
         self.events.deinit();
-        
+
         // Free existing files map
         var it = self.existing_files.keyIterator();
         while (it.next()) |key| {
@@ -62,21 +62,21 @@ pub const FSWatcher = struct {
 
     pub fn start(self: *FSWatcher) !void {
         if (self.is_running) return;
-        
+
         try self.startWatching();
         self.is_running = true;
     }
 
     pub fn stop(self: *FSWatcher) void {
         if (!self.is_running) return;
-        
+
         self.stopWatching();
         self.is_running = false;
     }
 
     pub fn checkEvents(self: *FSWatcher) !bool {
         if (!self.is_running) return false;
-        
+
         // Clear previous events
         if (self.events.items.len > 0) {
             for (self.events.items) |event| {
@@ -84,23 +84,10 @@ pub const FSWatcher = struct {
             }
             self.events.clearRetainingCapacity();
         }
-        
-        // Special handling for watch mode test paths
-        const is_watch_test = std.mem.indexOf(u8, self.path, "watch_test") != null or
-                              std.mem.indexOf(u8, self.path, "test_integration") != null or
-                              std.mem.indexOf(u8, self.path, "GgJvblpU5VpkrwQH") != null or 
-                              std.mem.indexOf(u8, self.path, "02a0EYNHFXfb8nYX") != null or
-                              std.mem.indexOf(u8, self.path, "8gip7K5NIvUH0393") != null;
-        
-        if (is_watch_test) {
-            debugPrint("Watch test mode detected, performing thorough scan\n", .{});
-            try self.performFullScan();
-            return self.events.items.len > 0;
-        }
-        
+
         // Always perform a full scan of the directory to ensure we don't miss any files
         try self.performFullScan();
-        
+
         // Also poll platform-specific events
         return try self.pollEvents() or self.events.items.len > 0;
     }
@@ -109,7 +96,7 @@ pub const FSWatcher = struct {
         // Open the directory
         var dir = try fs.cwd().openDir(self.path, .{ .iterate = true });
         defer dir.close();
-        
+
         // Create a map to track current files
         var current_files = std.StringHashMap(void).init(self.allocator);
         defer {
@@ -119,22 +106,19 @@ pub const FSWatcher = struct {
             }
             current_files.deinit();
         }
-        
+
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             try current_files.put(entry.name, {});
-            
-            // Special handling for watch mode test file
-            const is_watch_test_file = std.mem.indexOf(u8, entry.name, "watch_test_file.txt") != null;
-            
+
             // Check if this is a new file that we haven't seen before
-            if (is_watch_test_file or !self.existing_files.contains(entry.name)) {
+            if (!self.existing_files.contains(entry.name)) {
                 const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
                 debugPrint("Full scan found new file: {s}\n", .{entry.name});
-                
+
                 // This is a new file
                 try self.existing_files.put(entry.name, {});
-                
+
                 try self.events.append(WatchEvent{
                     .path = full_path,
                     .kind = .Create,
@@ -154,7 +138,7 @@ pub const FSWatcher = struct {
                 return error.UnsupportedOS;
             },
         }
-        
+
         // Perform initial scan of directory to establish baseline
         try self.performInitialScan();
     }
@@ -199,23 +183,23 @@ pub const FSWatcher = struct {
         // Scan the directory and store information about all files
         var dir = try fs.cwd().openDir(self.path, .{ .iterate = true });
         defer dir.close();
-        
+
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             // Just store filenames for later comparison
             const name_copy = try self.allocator.dupe(u8, entry.name);
-            
+
             // Store the name in existing_files map
             try self.existing_files.put(name_copy, {});
         }
-        
+
         debugPrint("Initial scan complete - indexed {d} items\n", .{self.existing_files.count()});
     }
 
     // Linux inotify implementation
     fn initInotify(self: *FSWatcher) !void {
         const linux = std.os.linux;
-        
+
         // Create inotify instance
         const fd = linux.inotify_init1(0);
         if (fd < 0) {
@@ -242,7 +226,7 @@ pub const FSWatcher = struct {
         const IN_MOVED_TO = 0x00000080;
         const IN_MOVED_FROM = 0x00000040;
         const IN_CLOSE_WRITE = 0x00000008;
-        
+
         // Add watch for the directory
         const mask = IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_TO | IN_MOVED_FROM | IN_CLOSE_WRITE;
         const wd = linux.inotify_add_watch(self.fd, @ptrCast(self.path), mask);
@@ -265,9 +249,9 @@ pub const FSWatcher = struct {
         const IN_MOVED_TO = 0x00000080;
         const IN_MOVED_FROM = 0x00000040;
         const IN_CLOSE_WRITE = 0x00000008;
-        
+
         var buffer: [4096]u8 = undefined;
-        
+
         // Set up a non-blocking read with a timeout
         var pfd = [_]linux.pollfd{
             .{
@@ -276,50 +260,50 @@ pub const FSWatcher = struct {
                 .revents = 0,
             },
         };
-        
+
         // Poll with a short timeout (100ms)
         const poll_result = linux.poll(&pfd, 1, 100);
         if (poll_result < 0) {
             debugPrint("Poll failed\n", .{});
             return false;
         }
-        
+
         if (poll_result == 0) {
             // Timeout, no events
             return false;
         }
-        
+
         if (pfd[0].revents & linux.POLL.IN == 0) {
             // No input events
             return false;
         }
-        
+
         // Read events
         const bytes_read = linux.read(self.fd, &buffer, buffer.len);
         if (bytes_read < 0) {
             debugPrint("Failed to read inotify events\n", .{});
             return false;
         }
-        
+
         if (bytes_read == 0) {
             return false;
         }
-        
+
         var offset: usize = 0;
         var has_events = false;
-        
+
         while (offset < bytes_read) {
             const event = @as(*align(1) const linux.inotify_event, @ptrCast(&buffer[offset]));
             offset += @sizeOf(linux.inotify_event);
-            
+
             if (event.len > 0) {
                 // Extract the filename
-                const name_end = std.mem.indexOfScalar(u8, buffer[offset..offset + event.len], 0) orelse event.len;
-                const name = buffer[offset..offset + name_end];
-                
+                const name_end = std.mem.indexOfScalar(u8, buffer[offset .. offset + event.len], 0) orelse event.len;
+                const name = buffer[offset .. offset + name_end];
+
                 // Create full path
                 const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, name });
-                
+
                 // Determine event type
                 var kind: EventKind = undefined;
                 if (event.mask & (IN_CREATE | IN_MOVED_TO) != 0) {
@@ -334,19 +318,19 @@ pub const FSWatcher = struct {
                     offset += event.len;
                     continue;
                 }
-                
+
                 // Add to events list
                 try self.events.append(WatchEvent{
                     .path = full_path,
                     .kind = kind,
                 });
-                
+
                 has_events = true;
             }
-            
+
             offset += event.len;
         }
-        
+
         return has_events;
     }
 
@@ -373,7 +357,7 @@ pub const FSWatcher = struct {
         // Open the directory to watch
         var dir = try fs.cwd().openDir(self.path, .{ .iterate = true });
         defer dir.close();
-        
+
         // Define constants for kqueue
         const EVFILT_VNODE = -4;
         const EV_ADD = 0x0001;
@@ -383,7 +367,7 @@ pub const FSWatcher = struct {
         const NOTE_DELETE = 0x0010;
         const NOTE_RENAME = 0x0020;
         const NOTE_ATTRIB = 0x0008;
-        
+
         // Use system Kevent type
         var changelist = [_]std.c.Kevent{
             std.c.Kevent{
@@ -395,10 +379,10 @@ pub const FSWatcher = struct {
                 .udata = 0,
             },
         };
-        
+
         // Create an empty eventlist for receiving events (not needed for registration)
         var eventlist = [_]std.c.Kevent{};
-        
+
         const result = std.c.kevent(self.kq, &changelist, changelist.len, &eventlist, 0, null);
         if (result < 0) {
             debugPrint("Failed to register kqueue events\n", .{});
@@ -414,21 +398,21 @@ pub const FSWatcher = struct {
     fn pollKqueue(self: *FSWatcher) !bool {
         // Use system Kevent type
         var eventlist = [_]std.c.Kevent{undefined};
-        
+
         // Create an empty changelist since we don't want to register new events
         var changelist = [_]std.c.Kevent{};
-        
+
         // Check for events - use null for timeout to make it non-blocking
         const nevents = std.c.kevent(self.kq, &changelist, 0, &eventlist, eventlist.len, null);
         if (nevents < 0) {
             debugPrint("Failed to poll kqueue events\n", .{});
             return false;
         }
-        
+
         // Always do a full directory scan whether we got kevent notifications or not
         // This ensures we don't miss any file creations, which is critical for the test
         var has_events = false;
-        
+
         // Keep track of current files to detect deletions
         var current_files = std.StringHashMap(void).init(self.allocator);
         defer {
@@ -438,40 +422,40 @@ pub const FSWatcher = struct {
             }
             current_files.deinit();
         }
-        
+
         // Scan the directory for all current files
         var dir = try fs.cwd().openDir(self.path, .{ .iterate = true });
         defer dir.close();
-        
+
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             const name_copy = try self.allocator.dupe(u8, entry.name);
             try current_files.put(name_copy, {});
-            
+
             // Check if this is a new file that wasn't in our initial scan
             if (!self.existing_files.contains(entry.name)) {
                 const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
-                
+
                 debugPrint("Detected new file: {s}\n", .{entry.name});
-                
+
                 // This is a new file that wasn't in the original directory scan
                 try self.events.append(WatchEvent{
                     .path = full_path,
                     .kind = .Create,
                 });
-                
+
                 // Add to existing files to avoid reporting it twice
                 const orig_name_copy = try self.allocator.dupe(u8, entry.name);
                 try self.existing_files.put(orig_name_copy, {});
-                
+
                 has_events = true;
             }
         }
-        
+
         // Now look for file modifications by checking status
         if (nevents > 0) {
             debugPrint("Received kqueue events, checking for file modifications\n", .{});
-            
+
             // We got actual events, process them
             for (0..@intCast(nevents)) |_| {
                 var iter2 = dir.iterate();
@@ -479,23 +463,23 @@ pub const FSWatcher = struct {
                     // Check if it's been modified
                     if (self.existing_files.contains(entry.name)) {
                         const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
-                        
+
                         // Get file status
                         const stat = try fs.cwd().statFile(full_path);
-                        
+
                         // Simple check: if the file was modified recently, consider it changed
                         const current_time = std.time.milliTimestamp();
                         const mtime_secs_i64: i64 = @intCast(stat.mtime);
                         const mtime_millis = mtime_secs_i64 * 1000; // Convert seconds to milliseconds
                         const age_millis = current_time - mtime_millis;
-                        
+
                         if (age_millis < 10000) { // If modified in the last 10 seconds
                             debugPrint("Detected modified file: {s}\n", .{entry.name});
                             try self.events.append(WatchEvent{
                                 .path = full_path,
                                 .kind = .Modify,
                             });
-                            
+
                             has_events = true;
                         } else {
                             // Not a recent modification, free the path
@@ -505,7 +489,7 @@ pub const FSWatcher = struct {
                 }
             }
         }
-        
+
         return has_events;
     }
 
@@ -566,12 +550,12 @@ pub const PollingFSWatcher = struct {
 
     pub fn deinit(self: *PollingFSWatcher) void {
         self.allocator.free(self.watch_path);
-        
+
         for (self.events.items) |event| {
             self.allocator.free(event.path);
         }
         self.events.deinit();
-        
+
         var it = self.last_scan.keyIterator();
         while (it.next()) |key| {
             self.allocator.free(key.*);
@@ -581,7 +565,7 @@ pub const PollingFSWatcher = struct {
 
     pub fn start(self: *PollingFSWatcher) !void {
         if (self.is_running) return;
-        
+
         // Initial scan
         try self.scanDirectory();
         self.is_running = true;
@@ -589,19 +573,19 @@ pub const PollingFSWatcher = struct {
 
     pub fn stop(self: *PollingFSWatcher) void {
         if (!self.is_running) return;
-        
+
         self.is_running = false;
     }
 
     pub fn checkEvents(self: *PollingFSWatcher) !bool {
         if (!self.is_running) return false;
-        
+
         // Clear previous events
         for (self.events.items) |event| {
             self.allocator.free(event.path);
         }
         self.events.clearRetainingCapacity();
-        
+
         // Scan and compare
         return try self.scanAndCompare();
     }
@@ -613,7 +597,7 @@ pub const PollingFSWatcher = struct {
             self.allocator.free(key.*);
         }
         self.last_scan.clearRetainingCapacity();
-        
+
         // Scan directory
         try self.scanRecursive(self.watch_path);
     }
@@ -621,29 +605,29 @@ pub const PollingFSWatcher = struct {
     fn scanRecursive(self: *PollingFSWatcher, dir_path: []const u8) !void {
         var dir = try fs.cwd().openDir(dir_path, .{ .iterate = true });
         defer dir.close();
-        
+
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             const full_path = try fs.path.join(self.allocator, &[_][]const u8{ dir_path, entry.name });
-            
+
             if (entry.kind == .directory) {
                 // Skip .git directories
                 if (std.mem.eql(u8, entry.name, ".git")) {
                     self.allocator.free(full_path);
                     continue;
                 }
-                
+
                 // Recursively scan subdirectory
                 try self.scanRecursive(full_path);
             }
-            
+
             // Get file stats
             const stat = try fs.cwd().statFile(full_path);
-            
+
             // Store in map
             const path_copy = try self.allocator.dupe(u8, full_path);
             try self.last_scan.put(path_copy, stat);
-            
+
             self.allocator.free(full_path);
         }
     }
@@ -657,22 +641,22 @@ pub const PollingFSWatcher = struct {
             }
             current_scan.deinit();
         }
-        
+
         // Scan current state
         var dir = try fs.cwd().openDir(self.watch_path, .{ .iterate = true });
         defer dir.close();
-        
+
         try self.scanRecursiveToMap(&current_scan, self.watch_path);
-        
+
         // Compare with previous scan
         var has_changes = false;
-        
+
         // Check for new or modified files
         var current_it = current_scan.iterator();
         while (current_it.next()) |entry| {
             const path = entry.key_ptr.*;
             const current_stat = entry.value_ptr.*;
-            
+
             if (self.last_scan.get(path)) |last_stat| {
                 // File exists in both scans, check if modified
                 if (last_stat.mtime != current_stat.mtime or last_stat.size != current_stat.size) {
@@ -694,12 +678,12 @@ pub const PollingFSWatcher = struct {
                 has_changes = true;
             }
         }
-        
+
         // Check for deleted files
         var last_it = self.last_scan.iterator();
         while (last_it.next()) |entry| {
             const path = entry.key_ptr.*;
-            
+
             if (!current_scan.contains(path)) {
                 // Deleted file
                 const path_copy = try self.allocator.dupe(u8, path);
@@ -710,49 +694,49 @@ pub const PollingFSWatcher = struct {
                 has_changes = true;
             }
         }
-        
+
         // Update last scan
         var it = self.last_scan.keyIterator();
         while (it.next()) |key| {
             self.allocator.free(key.*);
         }
         self.last_scan.clearRetainingCapacity();
-        
+
         current_it = current_scan.iterator();
         while (current_it.next()) |entry| {
             const path_copy = try self.allocator.dupe(u8, entry.key_ptr.*);
             try self.last_scan.put(path_copy, entry.value_ptr.*);
         }
-        
+
         return has_changes;
     }
 
     fn scanRecursiveToMap(self: *PollingFSWatcher, map: *std.StringHashMap(fs.File.Stat), dir_path: []const u8) !void {
         var dir = try fs.cwd().openDir(dir_path, .{ .iterate = true });
         defer dir.close();
-        
+
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             const full_path = try fs.path.join(self.allocator, &[_][]const u8{ dir_path, entry.name });
-            
+
             if (entry.kind == .directory) {
                 // Skip .git directories
                 if (std.mem.eql(u8, entry.name, ".git")) {
                     self.allocator.free(full_path);
                     continue;
                 }
-                
+
                 // Recursively scan subdirectory
                 try self.scanRecursiveToMap(map, full_path);
             }
-            
+
             // Get file stats
             const stat = try fs.cwd().statFile(full_path);
-            
+
             // Store in map
             const path_copy = try self.allocator.dupe(u8, full_path);
             try map.put(path_copy, stat);
-            
+
             self.allocator.free(full_path);
         }
     }
@@ -769,11 +753,11 @@ pub fn createWatcher(allocator: Allocator, watch_path: []const u8) !WatcherType 
     const native_watcher = FSWatcher.init(allocator, watch_path) catch |err| {
         debugPrint("Native file system watcher initialization failed: {any}\n", .{err});
         debugPrint("Falling back to polling-based watcher\n", .{});
-        
+
         // Fall back to polling-based watcher
         const polling_watcher = try PollingFSWatcher.init(allocator, watch_path);
         return WatcherType{ .PollingFSWatcher = polling_watcher };
     };
-    
+
     return WatcherType{ .FSWatcher = native_watcher };
 }
