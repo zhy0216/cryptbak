@@ -268,3 +268,104 @@ pub fn doEncrypt(allocator: Allocator, conf: Config) !void {
 
     return processBackup(allocator, conf, key, existing_metadata);
 }
+
+pub fn doWatch(allocator: Allocator, conf: Config) !void {
+    debugPrint("Starting watch mode on {s}\n", .{conf.source_dir});
+    debugPrint("Minimum backup period: {d} seconds\n", .{conf.min_backup_period});
+    
+    // Initial backup
+    try doEncrypt(allocator, conf);
+    
+    // Set up a timer to track when we last performed a backup
+    var last_backup_time = std.time.milliTimestamp();
+    var changes_detected = false;
+    
+    while (true) {
+        // Store current metadata for comparison
+        var initial_salt: [16]u8 = undefined;
+        @memset(&initial_salt, 0); // Use all-zero salt for initialization
+        var key: [32]u8 = undefined;
+        try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
+        
+        var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
+            if (err == error.FileNotFound) {
+                var empty_metadata = BackupMetadata.init(allocator);
+                defer empty_metadata.deinit();
+                continue;
+            }
+            return err;
+        };
+        defer existing_metadata.deinit();
+        
+        // Wait a short time before checking for changes (to reduce CPU usage)
+        std.time.sleep(std.time.ns_per_s * 2); // 2 second polling interval
+        
+        // Scan current directory state
+        var current_files = ArrayList(FileMetadata).init(allocator);
+        defer {
+            for (current_files.items) |file| {
+                if (!file.is_directory) allocator.free(file.path);
+            }
+            current_files.deinit();
+        }
+        
+        try fs_utils.scanDirectory(allocator, conf.source_dir, conf.source_dir, &current_files);
+        
+        // Compare with previous state to detect changes
+        changes_detected = try detectChanges(allocator, &existing_metadata, &current_files);
+        
+        // If changes detected and minimum backup period has passed
+        const current_time = std.time.milliTimestamp();
+        const elapsed_ms = current_time - last_backup_time;
+        const min_period_ms = conf.min_backup_period * std.time.ms_per_s;
+        
+        if (changes_detected and elapsed_ms >= min_period_ms) {
+            debugPrint("Changes detected, performing backup...\n", .{});
+            try doEncrypt(allocator, conf);
+            last_backup_time = std.time.milliTimestamp();
+            changes_detected = false;
+        } else if (changes_detected) {
+            debugPrint("Changes detected, but waiting for minimum backup period ({d} seconds)...\n", .{conf.min_backup_period});
+        }
+    }
+}
+
+fn detectChanges(allocator: Allocator, existing_metadata: *BackupMetadata, current_files: *ArrayList(FileMetadata)) !bool {
+    // Build a map of existing files for fast lookups
+    var existing_files_map = StringHashMap(FileMetadata).init(allocator);
+    defer existing_files_map.deinit();
+    
+    for (existing_metadata.files.items) |file| {
+        try existing_files_map.put(file.path, file);
+    }
+    
+    // Check for new or modified files
+    for (current_files.items) |file| {
+        const existing = existing_files_map.get(file.path);
+        
+        if (existing == null) {
+            // New file
+            debugPrint("New file detected: {s}\n", .{file.path});
+            return true;
+        }
+        
+        const existing_file = existing.?;
+        if (!std.mem.eql(u8, &existing_file.hash, &file.hash) or existing_file.size != file.size) {
+            // File has been modified
+            debugPrint("Modified file detected: {s}\n", .{file.path});
+            return true;
+        }
+    }
+    
+    // Check for deleted files
+    const files_in_existing = existing_files_map.count();
+    const files_in_current = current_files.items.len;
+    
+    if (files_in_existing != files_in_current) {
+        debugPrint("Files deleted or count mismatch. Existing: {d}, Current: {d}\n", .{files_in_existing, files_in_current});
+        return true;
+    }
+    
+    // No changes detected
+    return false;
+}

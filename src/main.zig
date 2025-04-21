@@ -15,7 +15,13 @@ pub fn main() !void {
     defer config.freeConfig(allocator, conf);
 
     switch (conf.mode) {
-        .Encrypt => try backup.doEncrypt(allocator, conf),
+        .Encrypt => {
+            if (conf.watch_mode) {
+                try backup.doWatch(allocator, conf);
+            } else {
+                try backup.doEncrypt(allocator, conf);
+            }
+        },
         .Decrypt => try backup.doDecrypt(allocator, conf),
     }
 }

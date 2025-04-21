@@ -89,6 +89,8 @@ test "backup with duplicate content files" {
         .output_dir = backup_path,
         .password = test_password,
         .mode = .Encrypt,
+        .watch_mode = false,
+        .min_backup_period = 90,
     };
 
     // Perform backup
@@ -116,6 +118,8 @@ test "backup with duplicate content files" {
         .output_dir = restore_path,
         .password = test_password,
         .mode = .Decrypt,
+        .watch_mode = false,
+        .min_backup_period = 90,
     };
 
     try backup.doDecrypt(testing.allocator, restore_config);
@@ -180,6 +184,8 @@ test "backup with duplicate content and file deletion" {
         .output_dir = backup_path,
         .password = test_password,
         .mode = .Encrypt,
+        .watch_mode = false,
+        .min_backup_period = 90,
     };
 
     // Perform first backup
@@ -288,6 +294,8 @@ test "backup with multiple files referencing same content" {
         .output_dir = backup_path,
         .password = test_password,
         .mode = .Encrypt,
+        .watch_mode = false,
+        .min_backup_period = 90,
     };
 
     // Perform backup

@@ -255,6 +255,67 @@ test_incremental_backup() {
     return 0
 }
 
+test_watch_mode() {
+    echo -e "\n${YELLOW}Test 4: Watch Mode${NC}"
+    
+    # Create a clean test directory
+    rm -rf "$RESTORE_DIR"
+    mkdir -p "$RESTORE_DIR"
+    
+    echo "Starting cryptbak in watch mode..."
+    "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -t -p "$TEST_PASSWORD" > /tmp/watch_output.log 2>&1 &
+    WATCH_PID=$!
+    
+    sleep 5
+    
+    # Check if the initial backup was created
+    if [ ! -d "$BACKUP_DIR/content" ]; then
+        echo -e "${RED}Failed: content subdirectory does not exist after initial backup${NC}"
+        kill $WATCH_PID
+        return 1
+    fi
+    
+    echo "Adding a new file..."
+    echo "This is a file created during watch mode test" > "$SOURCE_DIR/watch_test_file.txt"
+    
+    sleep 95
+    
+    # Check if backup was updated
+    echo "Checking if the file was backed up..."
+    
+    rm -rf "$RESTORE_DIR"
+    mkdir -p "$RESTORE_DIR"
+    
+    "$CRYPTBAK_BIN" "$BACKUP_DIR" "$RESTORE_DIR" -d -p "$TEST_PASSWORD" > /tmp/decrypt_output.log 2>&1
+    local result=$?
+    
+    if [ $result -ne 0 ]; then
+        echo -e "${RED}Decryption after watch mode backup failed, error code: $result${NC}"
+        cat /tmp/decrypt_output.log
+        kill $WATCH_PID
+        return 1
+    fi
+    
+    # Check if the new file was backed up
+    if [ ! -f "$RESTORE_DIR/watch_test_file.txt" ]; then
+        echo -e "${RED}Failed: watch mode did not backup the new file${NC}"
+        kill $WATCH_PID
+        return 1
+    fi
+    
+    if ! grep -q "This is a file created during watch mode test" "$RESTORE_DIR/watch_test_file.txt"; then
+        echo -e "${RED}Failed: backed up file content is incorrect${NC}"
+        kill $WATCH_PID
+        return 1
+    fi
+    
+    echo "Terminating watch mode process..."
+    kill $WATCH_PID
+    
+    echo -e "${GREEN}Test 4 passed: Watch mode successfully detected and backed up file changes${NC}"
+    return 0
+}
+
 # Run Zig unit tests
 run_unit_tests() {
     echo -e "\n${YELLOW}Running Zig unit tests...${NC}"
@@ -310,6 +371,8 @@ run_all_tests() {
     test_simple_decryption
 
     test_incremental_backup
+    
+    test_watch_mode
 
     echo -e "\n${GREEN}Tests completed!${NC}"
     return 0
