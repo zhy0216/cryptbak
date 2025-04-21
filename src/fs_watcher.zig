@@ -78,8 +78,11 @@ pub const FSWatcher = struct {
     pub fn checkEvents(self: *FSWatcher) !bool {
         if (!self.is_running) return false;
 
+        debugPrint("[FSWatcher] checkEvents called, is_running = {}, current events count = {d}\n", .{ self.is_running, self.events.items.len });
+
         // Clear previous events
         if (self.events.items.len > 0) {
+            debugPrint("[FSWatcher] Clearing {d} previous events\n", .{self.events.items.len});
             for (self.events.items) |event| {
                 self.allocator.free(event.path);
             }
@@ -87,35 +90,44 @@ pub const FSWatcher = struct {
         }
 
         // Always perform a full scan of the directory to ensure we don't miss any files
+        debugPrint("[FSWatcher] Performing full scan of directory: {s}\n", .{self.path});
         try self.performFullScan();
 
         // Also poll platform-specific events
-        return try self.pollEvents() or self.events.items.len > 0;
+        const poll_result = try self.pollEvents();
+        const has_events = poll_result or self.events.items.len > 0;
+
+        debugPrint("[FSWatcher] checkEvents complete: poll_result = {}, events count = {d}, returning has_events = {}\n", .{ poll_result, self.events.items.len, has_events });
+
+        return has_events;
     }
 
     fn performFullScan(self: *FSWatcher) !void {
         // Open the directory
+        debugPrint("[FSWatcher] performFullScan starting for path: {s}\n", .{self.path});
         var dir = try fs.cwd().openDir(self.path, .{ .iterate = true });
         defer dir.close();
 
         // Create a map to track current files
         var current_files = std.StringHashMap(void).init(self.allocator);
-        defer {
-            var it = current_files.keyIterator();
-            while (it.next()) |_| {
-                // We don't own these strings
-            }
-            current_files.deinit();
-        }
+        defer current_files.deinit();
 
+        // Track which existing files we've seen in this scan
+        var seen_files = std.StringHashMap(void).init(self.allocator);
+        defer seen_files.deinit();
+
+        debugPrint("[FSWatcher] Starting directory iteration, existing_files count = {d}\n", .{self.existing_files.count()});
+
+        // First scan directory to find all current files
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
+            // Store name in current_files
             try current_files.put(entry.name, {});
 
             // Check if this is a new file that we haven't seen before
             if (!self.existing_files.contains(entry.name)) {
                 const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
-                debugPrint("Full scan found new file: {s}\n", .{entry.name});
+                debugPrint("[FSWatcher] Full scan found new file: {s}, type = {s}\n", .{ entry.name, @tagName(entry.kind) });
 
                 // Store a copy of the name in existing_files
                 const name_copy = try self.allocator.dupe(u8, entry.name);
@@ -125,11 +137,52 @@ pub const FSWatcher = struct {
                     .path = full_path,
                     .kind = .Create,
                 });
+            } else {
+                debugPrint("[FSWatcher] Full scan found existing file: {s}\n", .{entry.name});
+            }
+
+            // Always mark this file as seen, whether it's new or existing
+            try seen_files.put(entry.name, {});
+        }
+
+        debugPrint("[FSWatcher] Directory iteration complete. current_files = {d}, seen_files = {d}\n", .{ current_files.count(), seen_files.count() });
+
+        // Now check for any files that existed before but aren't present now (deleted files)
+        var it = self.existing_files.keyIterator();
+        var files_to_remove = std.ArrayList([]const u8).init(self.allocator);
+        defer files_to_remove.deinit();
+
+        while (it.next()) |key| {
+            const file_name = key.*;
+
+            // If file was in existing_files but not seen in this scan, it was deleted
+            if (!seen_files.contains(file_name)) {
+                const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, file_name });
+                debugPrint("[FSWatcher] Full scan detected deleted file: {s}\n", .{file_name});
+
+                try self.events.append(WatchEvent{
+                    .path = full_path,
+                    .kind = .Delete,
+                });
+
+                // Add to the list of files to remove - we can't remove while iterating
+                try files_to_remove.append(file_name);
             }
         }
+
+        debugPrint("[FSWatcher] Found {d} files to remove from tracking\n", .{files_to_remove.items.len});
+
+        // Now remove deleted files from existing_files
+        for (files_to_remove.items) |file_name| {
+            if (self.existing_files.fetchRemove(file_name)) |kv| {
+                debugPrint("[FSWatcher] Removing file from tracking: {s}\n", .{file_name});
+                self.allocator.free(kv.key);
+            }
+        }
+
+        debugPrint("[FSWatcher] performFullScan complete. Events count = {d}, existing_files = {d}\n", .{ self.events.items.len, self.existing_files.count() });
     }
 
-    // Platform-specific implementations
     fn initPlatformSpecific(self: *FSWatcher) !void {
         switch (builtin.os.tag) {
             .linux => try self.initInotify(),
@@ -768,22 +821,22 @@ pub fn createWatcher(allocator: Allocator, watch_path: []const u8) !WatcherType 
 test "FSWatcher scan" {
     const testing = std.testing;
     const temp_allocator = testing.allocator;
-    
+
     // Create a temporary test directory
     const test_dir = "fs_watcher_test_dir";
-    
+
     // Delete the directory if it already exists
     std.fs.cwd().deleteTree(test_dir) catch |err| {
         if (err != error.FileNotFound) {
             debugPrint("Warning: Failed to delete test dir: {any}\n", .{err});
         }
     };
-    
+
     try std.fs.cwd().makeDir(test_dir);
     defer std.fs.cwd().deleteTree(test_dir) catch {};
-    
+
     debugPrint("\nTesting FSWatcher scan functionality...\n", .{});
-    
+
     // Create a simple FSWatcher instance
     var watcher = FSWatcher{
         .allocator = temp_allocator,
@@ -797,12 +850,12 @@ test "FSWatcher scan" {
     };
     defer {
         temp_allocator.free(watcher.path);
-        
+
         for (watcher.events.items) |event| {
             temp_allocator.free(event.path);
         }
         watcher.events.deinit();
-        
+
         // Free all keys in existing_files
         var it = watcher.existing_files.keyIterator();
         while (it.next()) |key| {
@@ -810,29 +863,29 @@ test "FSWatcher scan" {
         }
         watcher.existing_files.deinit();
     }
-    
+
     // Create a test file
     const test_file = try std.fs.path.join(temp_allocator, &[_][]const u8{ test_dir, "test_file.txt" });
     defer temp_allocator.free(test_file);
-    
+
     {
         const file = try std.fs.cwd().createFile(test_file, .{});
         file.close();
     }
     debugPrint("Created test file: {s}\n", .{test_file});
-    
+
     // Test performFullScan function directly
     try watcher.performFullScan();
-    
+
     // Check for events
     debugPrint("Events after scan: {d}\n", .{watcher.events.items.len});
     for (watcher.events.items, 0..) |event, i| {
-        debugPrint("Event {d}: kind={any}, path={s}\n", .{i, event.kind, event.path});
+        debugPrint("Event {d}: kind={any}, path={s}\n", .{ i, event.kind, event.path });
     }
-    
+
     // Verify that we detected the file
     try testing.expect(watcher.events.items.len > 0);
-    
+
     var found_file = false;
     for (watcher.events.items) |event| {
         if (std.mem.indexOf(u8, event.path, "test_file.txt") != null) {
@@ -847,22 +900,22 @@ test "FSWatcher scan" {
 test "FSWatcher checkEvents" {
     const testing = std.testing;
     const temp_allocator = testing.allocator;
-    
+
     // Create a temporary test directory
     const test_dir = "fs_watcher_events_test_dir";
-    
+
     // Delete the directory if it already exists
     std.fs.cwd().deleteTree(test_dir) catch |err| {
         if (err != error.FileNotFound) {
             debugPrint("Warning: Failed to delete test dir: {any}\n", .{err});
         }
     };
-    
+
     try std.fs.cwd().makeDir(test_dir);
     defer std.fs.cwd().deleteTree(test_dir) catch {};
-    
+
     debugPrint("\nTesting FSWatcher checkEvents functionality...\n", .{});
-    
+
     // Create a simple FSWatcher instance
     var watcher = FSWatcher{
         .allocator = temp_allocator,
@@ -876,12 +929,12 @@ test "FSWatcher checkEvents" {
     };
     defer {
         temp_allocator.free(watcher.path);
-        
+
         for (watcher.events.items) |event| {
             temp_allocator.free(event.path);
         }
         watcher.events.deinit();
-        
+
         // Free all keys in existing_files
         var it = watcher.existing_files.keyIterator();
         while (it.next()) |key| {
@@ -889,36 +942,36 @@ test "FSWatcher checkEvents" {
         }
         watcher.existing_files.deinit();
     }
-    
+
     // Perform initial scan to establish baseline
     try watcher.performInitialScan();
     debugPrint("Initial scan complete - indexed {d} items\n", .{watcher.existing_files.count()});
-    
+
     // Create a test file
     const test_file = try std.fs.path.join(temp_allocator, &[_][]const u8{ test_dir, "test_events_file.txt" });
     defer temp_allocator.free(test_file);
-    
+
     {
         const file = try std.fs.cwd().createFile(test_file, .{});
         file.close();
     }
     debugPrint("Created test file: {s}\n", .{test_file});
-    
+
     // Test checkEvents function
     const has_events = try watcher.checkEvents();
-    
+
     // Verify we got events
     debugPrint("checkEvents returned: {}\n", .{has_events});
     debugPrint("Events detected: {d}\n", .{watcher.events.items.len});
-    
+
     for (watcher.events.items, 0..) |event, i| {
-        debugPrint("Event {d}: kind={any}, path={s}\n", .{i, event.kind, event.path});
+        debugPrint("Event {d}: kind={any}, path={s}\n", .{ i, event.kind, event.path });
     }
-    
-    // There should be at least one event 
+
+    // There should be at least one event
     try testing.expect(has_events);
     try testing.expect(watcher.events.items.len > 0);
-    
+
     // At least one event should be for our test file
     var found_file = false;
     for (watcher.events.items) |event| {
@@ -928,37 +981,37 @@ test "FSWatcher checkEvents" {
         }
     }
     try testing.expect(found_file);
-    
+
     // Call checkEvents again - should clear previous events
     // Create another test file
     const test_file2 = try std.fs.path.join(temp_allocator, &[_][]const u8{ test_dir, "test_events_file2.txt" });
     defer temp_allocator.free(test_file2);
-    
+
     {
         const file = try std.fs.cwd().createFile(test_file2, .{});
         file.close();
     }
     debugPrint("Created second test file: {s}\n", .{test_file2});
-    
+
     // Call checkEvents again
     const has_more_events = try watcher.checkEvents();
-    
+
     // Verify we got events
     debugPrint("Second checkEvents returned: {}\n", .{has_more_events});
     debugPrint("Events detected: {d}\n", .{watcher.events.items.len});
-    
+
     for (watcher.events.items, 0..) |event, i| {
-        debugPrint("Event {d}: kind={any}, path={s}\n", .{i, event.kind, event.path});
+        debugPrint("Event {d}: kind={any}, path={s}\n", .{ i, event.kind, event.path });
     }
-    
+
     // There should be at least one event and it should be for the second file only
     try testing.expect(has_more_events);
     try testing.expect(watcher.events.items.len > 0);
-    
+
     // Events should NOT contain the first file anymore (should be cleared)
     var found_first_file = false;
     var found_second_file = false;
-    
+
     for (watcher.events.items) |event| {
         if (std.mem.indexOf(u8, event.path, "test_events_file.txt") != null) {
             found_first_file = true;
@@ -967,7 +1020,7 @@ test "FSWatcher checkEvents" {
             found_second_file = true;
         }
     }
-    
+
     try testing.expect(!found_first_file); // First file events should be cleared
     try testing.expect(found_second_file); // Second file events should be detected
 }

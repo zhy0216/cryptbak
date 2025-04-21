@@ -1,11 +1,45 @@
 #!/bin/bash
-set -e  # Exit immediately on error
 
-# Color definitions
-RED='\033[0;31m'
+# Colors for output
 GREEN='\033[0;32m'
+RED='\033[0;31m'
 YELLOW='\033[0;33m'
-NC='\033[0m' # No color
+NC='\033[0m' # No Color
+
+# Paths
+CRYPTBAK_BIN="./zig-out/bin/cryptbak"
+TEST_DIR="./test_integration"
+SOURCE_DIR="$TEST_DIR/source"
+BACKUP_DIR="$TEST_DIR/backup"
+RESTORE_DIR="$TEST_DIR/restore"
+TEST_PASSWORD="test_password_123"
+
+# Create the test directory if it doesn't exist
+mkdir -p "$TEST_DIR"
+
+# Available tests
+AVAILABLE_TESTS=("unit" "encrypt" "decrypt" "incremental" "watch")
+
+# Function to print usage information
+print_usage() {
+    echo -e "${YELLOW}Usage:${NC} $0 [test_name]"
+    echo -e "Available tests:"
+    echo -e "  unit        - Run unit tests"
+    echo -e "  encrypt     - Test file encryption"
+    echo -e "  decrypt     - Test file decryption"
+    echo -e "  incremental - Test incremental backup"
+    echo -e "  watch       - Test watch mode"
+    echo -e "  all         - Run all tests (default)"
+    echo -e "  help        - Show this help message"
+}
+
+# Check if the binary exists
+check_binary() {
+    if [ ! -f "$CRYPTBAK_BIN" ]; then
+        echo -e "${RED}Error: $CRYPTBAK_BIN not found. Please build the project first.${NC}"
+        exit 1
+    fi
+}
 
 # Test directories
 TEST_BASE="$(pwd)/test_integration"
@@ -73,7 +107,7 @@ run_cmd() {
 }
 
 # Test simple encryption
-test_simple_encryption() {
+test_file_encryption() {
     echo -e "\n${YELLOW}Test 1: Simple File Encryption${NC}"
 
     echo "Running encryption..."
@@ -108,7 +142,7 @@ test_simple_encryption() {
 }
 
 # Test simple decryption
-test_simple_decryption() {
+test_file_decryption() {
     echo -e "\n${YELLOW}Test 2: File Decryption${NC}"
 
     echo "Running decryption..."
@@ -376,52 +410,81 @@ run_unit_tests() {
     return 0
 }
 
-# Run all tests
-run_all_tests() {
-    # First run unit tests
-    run_unit_tests || {
-        echo -e "${RED}Unit tests failed, skipping integration tests${NC}"
-        return 1
-    }
-
-    # Then run integration tests
-    setup_test_environment
-
-    test_simple_encryption || {
-        echo -e "${RED}Simple encryption test failed, aborting tests${NC}"
-        return 1
-    }
-
-    test_simple_decryption || {
-        echo -e "${RED}Simple decryption test failed, aborting tests${NC}"
-        return 1
-    }
-
-    test_incremental_backup || {
-        echo -e "${RED}Incremental backup test failed, aborting tests${NC}"
-        return 1
-    }
-    
-    test_watch_mode || {
-        echo -e "${RED}Watch mode test failed, aborting tests${NC}"
-        return 1
-    }
-
-    echo -e "\n${GREEN}All tests completed successfully!${NC}"
-    return 0
-}
-
 # Main function
 main() {
-    # Check if cryptbak binary exists
-    if [ ! -f "$CRYPTBAK_BIN" ]; then
-        echo -e "${RED}Error: cryptbak program does not exist at $CRYPTBAK_BIN${NC}"
-        exit 1
+    # Check for help flag
+    if [ "$1" == "help" ] || [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+        print_usage
+        exit 0
     fi
 
-    run_all_tests
+    check_binary
+
+    # Default is to run all tests
+    local test_to_run="all"
+    
+    # If an argument is provided, validate it
+    if [ $# -gt 0 ]; then
+        test_to_run="$1"
+        # Check if the specified test is valid
+        local valid_test=false
+        for t in "${AVAILABLE_TESTS[@]}" "all"; do
+            if [ "$test_to_run" == "$t" ]; then
+                valid_test=true
+                break
+            fi
+        done
+        
+        if [ "$valid_test" == "false" ]; then
+            echo -e "${RED}Error: Invalid test name '$test_to_run'${NC}"
+            print_usage
+            exit 1
+        fi
+    fi
+    
+    # Run the selected test(s)
+    echo -e "${YELLOW}Running tests: $test_to_run${NC}"
+    
+    # First run unit tests unless specifically running a different test
+    if [ "$test_to_run" == "all" ] || [ "$test_to_run" == "unit" ]; then
+        if ! run_unit_tests; then
+            echo -e "${RED}Unit tests failed, aborting further tests${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Run the specific integration test or all of them
+    if [ "$test_to_run" == "all" ] || [ "$test_to_run" == "encrypt" ]; then
+        if ! test_file_encryption; then
+            echo -e "${RED}File encryption test failed, aborting tests${NC}"
+            exit 1
+        fi
+    fi
+    
+    if [ "$test_to_run" == "all" ] || [ "$test_to_run" == "decrypt" ]; then
+        if ! test_file_decryption; then
+            echo -e "${RED}File decryption test failed, aborting tests${NC}"
+            exit 1
+        fi
+    fi
+    
+    if [ "$test_to_run" == "all" ] || [ "$test_to_run" == "incremental" ]; then
+        if ! test_incremental_backup; then
+            echo -e "${RED}Incremental backup test failed, aborting tests${NC}"
+            exit 1
+        fi
+    fi
+    
+    if [ "$test_to_run" == "all" ] || [ "$test_to_run" == "watch" ]; then
+        if ! test_watch_mode; then
+            echo -e "${RED}Watch mode test failed, aborting tests${NC}"
+            exit 1
+        fi
+    fi
+    
+    echo -e "${GREEN}All selected tests passed successfully!${NC}"
     exit 0
 }
 
-# Execute main function
-main
+# Run the main function
+main "$@"
