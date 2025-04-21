@@ -263,7 +263,7 @@ test_watch_mode() {
     mkdir -p "$RESTORE_DIR"
     
     echo "Starting cryptbak in watch mode..."
-    "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -t -p "$TEST_PASSWORD" > /tmp/watch_output.log 2>&1 &
+    "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -t -p "$TEST_PASSWORD" --mt 5 > /tmp/watch_output.log 2>&1 &
     WATCH_PID=$!
     
     sleep 5
@@ -278,7 +278,9 @@ test_watch_mode() {
     echo "Adding a new file..."
     echo "This is a file created during watch mode test" > "$SOURCE_DIR/watch_test_file.txt"
     
-    sleep 95
+    # Sleep for 8 seconds (5 seconds minimum backup period + buffer)
+    echo "Waiting for backup to occur (15 seconds)..."
+    sleep 8
     
     # Check if backup was updated
     echo "Checking if the file was backed up..."
