@@ -303,8 +303,8 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
                 const min_period_ms = conf.min_backup_period * std.time.ms_per_s;
                 
                 if (changes_detected and elapsed_ms >= min_period_ms) {
-                    debugPrint("Changes detected, performing backup...\n", .{});
-                    try doEncrypt(allocator, conf);
+                    debugPrint("Changes detected, performing partial backup...\n", .{});
+                    try doPartialBackup(allocator, conf, native_watcher.events.items);
                     last_backup_time = std.time.milliTimestamp();
                     changes_detected = false;
                 } else if (changes_detected) {
@@ -318,8 +318,8 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
                         const check_elapsed = check_time - last_backup_time;
                         
                         if (check_elapsed >= min_period_ms) {
-                            debugPrint("Minimum period reached, performing backup...\n", .{});
-                            try doEncrypt(allocator, conf);
+                            debugPrint("Minimum period reached, performing partial backup...\n", .{});
+                            try doPartialBackup(allocator, conf, native_watcher.events.items);
                             last_backup_time = std.time.milliTimestamp();
                             changes_detected = false;
                             break;
@@ -346,8 +346,8 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
                 const min_period_ms = conf.min_backup_period * std.time.ms_per_s;
                 
                 if (changes_detected and elapsed_ms >= min_period_ms) {
-                    debugPrint("Changes detected, performing backup...\n", .{});
-                    try doEncrypt(allocator, conf);
+                    debugPrint("Changes detected, performing partial backup...\n", .{});
+                    try doPartialBackup(allocator, conf, polling_watcher.events.items);
                     last_backup_time = std.time.milliTimestamp();
                     changes_detected = false;
                 } else if (changes_detected) {
@@ -361,8 +361,8 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
                         const check_elapsed = check_time - last_backup_time;
                         
                         if (check_elapsed >= min_period_ms) {
-                            debugPrint("Minimum period reached, performing backup...\n", .{});
-                            try doEncrypt(allocator, conf);
+                            debugPrint("Minimum period reached, performing partial backup...\n", .{});
+                            try doPartialBackup(allocator, conf, polling_watcher.events.items);
                             last_backup_time = std.time.milliTimestamp();
                             changes_detected = false;
                             break;
@@ -375,6 +375,187 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
             }
         },
     }
+}
+
+// Process only changed files for partial backup
+pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_watcher.WatchEvent) !void {
+    debugPrint("Performing partial backup of changed files...\n", .{});
+    
+    // Use all-zero initial salt for key derivation, matching doDecrypt
+    var initial_salt: [16]u8 = undefined;
+    @memset(&initial_salt, 0); // Use all-zero salt for initialization
+    var key: [32]u8 = undefined;
+    try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
+    
+    // Try to load existing metadata
+    var empty_metadata = BackupMetadata.init(allocator);
+    defer empty_metadata.deinit();
+    
+    var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
+        if (err == error.FileNotFound) {
+            // If no metadata exists, do a full backup instead
+            debugPrint("No existing metadata found, performing full backup instead\n", .{});
+            return doEncrypt(allocator, conf);
+        }
+        return err;
+    };
+    defer existing_metadata.deinit();
+    
+    // Create a set of changed paths from events
+    var changed_paths = StringHashMap(void).init(allocator);
+    defer {
+        var it = changed_paths.keyIterator();
+        while (it.next()) |key| {
+            allocator.free(key.*);
+        }
+        changed_paths.deinit();
+    }
+    
+    // Add all changed paths to the set
+    for (events) |event| {
+        // Get the relative path from the source directory
+        const rel_path = if (std.mem.startsWith(u8, event.path, conf.source_dir)) blk: {
+            // Skip the source_dir prefix and the separator
+            const start_idx = conf.source_dir.len;
+            const path = if (start_idx < event.path.len and event.path[start_idx] == '/') 
+                event.path[start_idx + 1..] 
+                else event.path[start_idx..];
+            break :blk try allocator.dupe(u8, path);
+        } else blk: {
+            break :blk try allocator.dupe(u8, event.path);
+        };
+        
+        try changed_paths.put(rel_path, {});
+    }
+    
+    // If no changes detected, nothing to do
+    if (changed_paths.count() == 0) {
+        debugPrint("No changes to backup\n", .{});
+        return;
+    }
+    
+    // Scan source directory for current state
+    var current_files = ArrayList(FileMetadata).init(allocator);
+    defer {
+        // Don't free the path strings as they are transferred to new_metadata
+        current_files.deinit();
+    }
+    
+    try fs_utils.scanDirectory(allocator, conf.source_dir, conf.source_dir, &current_files);
+    
+    // Build a map of existing files for fast lookups
+    var existing_files_map = StringHashMap(FileMetadata).init(allocator);
+    defer existing_files_map.deinit();
+    
+    for (existing_metadata.files.items) |file| {
+        try existing_files_map.put(file.path, file);
+    }
+    
+    // Create new metadata starting with existing metadata
+    var new_metadata = BackupMetadata.init(allocator);
+    defer new_metadata.deinit();
+    
+    // Copy all files from existing metadata to new metadata
+    for (existing_metadata.files.items) |file| {
+        const path_copy = try allocator.dupe(u8, file.path);
+        var new_file = file;
+        new_file.path = path_copy;
+        try new_metadata.files.append(new_file);
+    }
+    
+    // Ensure the content directory exists
+    const content_dir = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, "content" });
+    defer allocator.free(content_dir);
+    try fs.cwd().makePath(content_dir);
+    
+    // Process each file: only encrypt if changed or new
+    for (current_files.items) |file| {
+        // Check if this file is in the changed paths set
+        const is_changed = changed_paths.contains(file.path) or 
+                           (file.is_directory and hasParentInSet(&changed_paths, file.path));
+        
+        if (!is_changed) {
+            continue; // Skip unchanged files
+        }
+        
+        const source_path = try fs.path.join(allocator, &[_][]const u8{ conf.source_dir, file.path });
+        defer allocator.free(source_path);
+        
+        // If it's a directory, don't create it in the backup structure, just record in metadata
+        if (file.is_directory) {
+            debugPrint("Recording directory in metadata (not creating in backup): {s}\n", .{file.path});
+            
+            // Update metadata with this directory
+            updateMetadataFile(&new_metadata, file);
+            continue;
+        }
+        
+        // For files, create a content-based hashed filename and store in content directory
+        const content_hashed_name = try crypto_utils.getContentHashedPath(allocator, file.hash);
+        defer allocator.free(content_hashed_name);
+        
+        const dest_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hashed_name });
+        defer allocator.free(dest_path);
+        
+        const existing = existing_files_map.get(file.path);
+        const needs_update = blk: {
+            if (existing == null) {
+                debugPrint("New file: {s}\n", .{file.path});
+                break :blk true;
+            }
+            
+            const existing_file = existing.?;
+            if (!std.mem.eql(u8, &existing_file.hash, &file.hash) or existing_file.size != file.size) {
+                debugPrint("Changed file: {s}\n", .{file.path});
+                break :blk true;
+            }
+            
+            break :blk false;
+        };
+        
+        if (needs_update) {
+            var nonce: [12]u8 = undefined;
+            std.crypto.random.bytes(&nonce);
+            
+            const enc_key = key;
+            
+            try crypto_utils.encryptFile(source_path, dest_path, enc_key, nonce);
+        } else {
+            debugPrint("File unchanged, skipping: {s}\n", .{file.path});
+        }
+        
+        // Update metadata with this file
+        updateMetadataFile(&new_metadata, file);
+    }
+    
+    // Save new metadata
+    try metadata.saveMetadata(allocator, new_metadata, conf.output_dir, key);
+    debugPrint("Partial backup completed successfully!\n", .{});
+}
+
+// Helper function to check if a file's parent directory is in the changed paths set
+fn hasParentInSet(changed_paths: *const StringHashMap(void), path: []const u8) bool {
+    var parent_path = fs.path.dirname(path) orelse return false;
+    if (parent_path.len == 0) return false;
+    
+    return changed_paths.contains(parent_path);
+}
+
+// Helper function to update a file in the metadata
+fn updateMetadataFile(new_metadata: *BackupMetadata, file: FileMetadata) void {
+    // Find and update the file in the metadata
+    for (new_metadata.files.items, 0..) |*existing, i| {
+        if (std.mem.eql(u8, existing.path, file.path)) {
+            // Update the existing entry
+            new_metadata.files.items[i] = file;
+            return;
+        }
+    }
+    
+    // If not found, append it
+    new_metadata.files.append(file) catch |err| {
+        debugPrint("Warning: Failed to append file to metadata: {any}\n", .{err});
+    };
 }
 
 fn detectChanges(allocator: Allocator, existing_metadata: *BackupMetadata, current_files: *ArrayList(FileMetadata)) !bool {

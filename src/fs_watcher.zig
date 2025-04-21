@@ -265,10 +265,8 @@ pub const FSWatcher = struct {
 
     // macOS/BSD kqueue implementation
     fn initKqueue(self: *FSWatcher) !void {
-        const darwin = std.os.darwin;
-        
-        // Create kqueue
-        const kq = darwin.kqueue();
+        // Use direct system calls instead of std.os.darwin which doesn't exist
+        const kq = std.c.kqueue();
         if (kq < 0) {
             debugPrint("Failed to initialize kqueue\n", .{});
             return error.KqueueInitFailed;
@@ -278,32 +276,48 @@ pub const FSWatcher = struct {
 
     fn deinitKqueue(self: *FSWatcher) void {
         if (self.kq != -1) {
-            const darwin = std.os.darwin;
-            _ = darwin.close(self.kq);
+            _ = std.c.close(self.kq);
             self.kq = -1;
         }
     }
 
     fn startKqueue(self: *FSWatcher) !void {
-        const darwin = std.os.darwin;
-        
         // Open the directory to watch
         var dir = try fs.cwd().openDir(self.watch_path, .{ .iterate = true });
         defer dir.close();
         
+        // Define constants for kqueue
+        const EVFILT_VNODE = -4;
+        const EV_ADD = 0x0001;
+        const EV_CLEAR = 0x0020;
+        const NOTE_WRITE = 0x0002;
+        const NOTE_EXTEND = 0x0004;
+        const NOTE_DELETE = 0x0010;
+        const NOTE_RENAME = 0x0020;
+        const NOTE_ATTRIB = 0x0008;
+        
         // Add directory to watch list
-        var changelist = [_]darwin.Kevent{
-            darwin.Kevent{
+        const Kevent = extern struct {
+            ident: usize,
+            filter: i16,
+            flags: u16,
+            fflags: u32,
+            data: i64,
+            udata: usize,
+        };
+        
+        var changelist = [_]Kevent{
+            Kevent{
                 .ident = @intCast(dir.fd),
-                .filter = darwin.EVFILT_VNODE,
-                .flags = darwin.EV_ADD | darwin.EV_CLEAR,
-                .fflags = darwin.NOTE_WRITE | darwin.NOTE_EXTEND | darwin.NOTE_DELETE | darwin.NOTE_RENAME | darwin.NOTE_ATTRIB,
+                .filter = EVFILT_VNODE,
+                .flags = EV_ADD | EV_CLEAR,
+                .fflags = NOTE_WRITE | NOTE_EXTEND | NOTE_DELETE | NOTE_RENAME | NOTE_ATTRIB,
                 .data = 0,
                 .udata = 0,
             },
         };
         
-        const result = darwin.kevent(self.kq, &changelist, changelist.len, null, 0, null);
+        const result = std.c.kevent(self.kq, &changelist, changelist.len, null, 0, null);
         if (result < 0) {
             debugPrint("Failed to register kqueue events\n", .{});
             return error.KqueueRegisterFailed;
@@ -316,13 +330,31 @@ pub const FSWatcher = struct {
     }
 
     fn pollKqueue(self: *FSWatcher) !bool {
-        const darwin = std.os.darwin;
+        // Define constants for kqueue
+        const EVFILT_VNODE = -4;
         
-        var eventlist = [_]darwin.Kevent{undefined};
-        var timeout = darwin.timespec{ .tv_sec = 0, .tv_nsec = 100000000 }; // 100ms
+        // Define Kevent struct for kqueue
+        const Kevent = extern struct {
+            ident: usize,
+            filter: i16,
+            flags: u16,
+            fflags: u32,
+            data: i64,
+            udata: usize,
+        };
+        
+        var eventlist = [_]Kevent{undefined};
+        
+        // Define timespec struct
+        const timespec = extern struct {
+            tv_sec: isize,
+            tv_nsec: isize,
+        };
+        
+        var timeout = timespec{ .tv_sec = 0, .tv_nsec = 100000000 }; // 100ms
         
         // Check for events
-        const nevents = darwin.kevent(self.kq, null, 0, &eventlist, eventlist.len, &timeout);
+        const nevents = std.c.kevent(self.kq, null, 0, &eventlist, eventlist.len, &timeout);
         if (nevents < 0) {
             debugPrint("Failed to poll kqueue events\n", .{});
             return false;
