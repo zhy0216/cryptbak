@@ -258,49 +258,64 @@ test_incremental_backup() {
 test_watch_mode() {
     echo -e "\n${YELLOW}Test 4: Watch Mode${NC}"
     
-    # Clean up and recreate all test directories for a clean test
+    # Clean up and recreate test directories
     echo "Setting up clean test environment for watch mode test..."
     rm -rf "$SOURCE_DIR" "$BACKUP_DIR" "$RESTORE_DIR"
     mkdir -p "$SOURCE_DIR"
     mkdir -p "$BACKUP_DIR"
     mkdir -p "$RESTORE_DIR"
     
-
-    echo "Starting cryptbak in watch mode..."
-    "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -t -p "$TEST_PASSWORD" --mt 5 > /tmp/watch_output.log 2>&1 &
-    WATCH_PID=$!
-
+    # Create an initial file for the initial backup
+    echo "Creating initial file..."
+    echo "Initial test file content" > "$SOURCE_DIR/initial_file.txt"
+    
+    # First run a normal backup to establish baseline
+    echo "Running initial backup..."
+    "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -p "$TEST_PASSWORD" > /tmp/initial_backup.log 2>&1
+    
+    # Get initial content count
     local initial_content_files_count=0
-    
-    sleep 5
-    # Create a simple test file
-    echo "Creating initial test file..."
-    echo "This is a simple test file for watch mode" > "$SOURCE_DIR/initial_file.txt"
-    
-
-    # Check if the initial backup was created
-    if [ ! -d "$BACKUP_DIR/content" ]; then
-        echo -e "${RED}Failed: content subdirectory does not exist after initial backup${NC}"
-        kill $WATCH_PID
-        return 1
+    if [ -d "$BACKUP_DIR/content" ]; then
+        initial_content_files_count=$(find "$BACKUP_DIR/content" -type f | wc -l)
     fi
+    echo "Initial content files count: $initial_content_files_count"
     
-
-    echo "Adding a new file..."
-    echo "This is a file created during watch mode test" > "$SOURCE_DIR/watch_test_file.txt"
+    # Now start watch mode
+    echo "Starting cryptbak in watch mode..."
+    "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -t -p "$TEST_PASSWORD" --mt 1 > /tmp/watch_output.log 2>&1 &
+    WATCH_PID=$!
     
-    # Sleep for 8 seconds (5 seconds minimum backup period + buffer)
+    # Wait for watch mode to initialize
+    echo "Waiting for watch mode to initialize (3 seconds)..."
+    sleep 3
+    
+    # Create new files with unique timestamps
+    echo "Creating new test files..."
+    local timestamp=$(date +%s)
+    echo "This is test file 1" > "$SOURCE_DIR/test_file_1_$timestamp.txt"
+    sleep 1
+    echo "This is test file 2" > "$SOURCE_DIR/test_file_2_$timestamp.txt"
+    
+    # Wait longer for watch mode to detect changes
     echo "Waiting for backup to occur (8 seconds)..."
     sleep 8
     
     # Terminate the watch process
     echo "Terminating watch mode process..."
     kill $WATCH_PID
+    sleep 1
     
     # Check if content directory has new files
-    local final_content_files_count=$(find "$BACKUP_DIR/content" -type f | wc -l)
+    local final_content_files_count=0
+    if [ -d "$BACKUP_DIR/content" ]; then
+        final_content_files_count=$(find "$BACKUP_DIR/content" -type f | wc -l)
+    fi
     
     echo "Content files count - Initial: $initial_content_files_count, Final: $final_content_files_count, Difference: $((final_content_files_count - initial_content_files_count))"
+    
+    # Display watch output for debugging
+    echo "Watch mode log output:"
+    cat /tmp/watch_output.log
     
     if [ $final_content_files_count -le $initial_content_files_count ]; then
         echo -e "${RED}Failed: No new content files added during watch mode${NC}"
@@ -310,7 +325,6 @@ test_watch_mode() {
     # Check if watch mode logged any errors
     if grep -q "Error" /tmp/watch_output.log; then
         echo -e "${RED}Failed: Watch mode logged errors${NC}"
-        cat /tmp/watch_output.log
         return 1
     fi
     
@@ -340,6 +354,11 @@ run_unit_tests() {
 
     if ! zig test src/config.zig; then
         echo -e "${RED}config.zig unit tests failed${NC}"
+        return 1
+    fi
+
+   if ! zig test src/fs_watcher.zig; then
+        echo -e "${RED}fs_watcher.zig unit tests failed${NC}"
         return 1
     fi
 

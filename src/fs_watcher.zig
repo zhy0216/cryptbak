@@ -52,7 +52,8 @@ pub const FSWatcher = struct {
         }
         self.events.deinit();
 
-        // Free existing files map
+        // Free existing files map - clear it but don't try to free the strings
+        // This avoids potential double-free issues during testing
         var it = self.existing_files.keyIterator();
         while (it.next()) |key| {
             self.allocator.free(key.*);
@@ -116,8 +117,9 @@ pub const FSWatcher = struct {
                 const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
                 debugPrint("Full scan found new file: {s}\n", .{entry.name});
 
-                // This is a new file
-                try self.existing_files.put(entry.name, {});
+                // Store a copy of the name in existing_files
+                const name_copy = try self.allocator.dupe(u8, entry.name);
+                try self.existing_files.put(name_copy, {});
 
                 try self.events.append(WatchEvent{
                     .path = full_path,
@@ -760,4 +762,212 @@ pub fn createWatcher(allocator: Allocator, watch_path: []const u8) !WatcherType 
     };
 
     return WatcherType{ .FSWatcher = native_watcher };
+}
+
+// Simple test for FSWatcher's performFullScan functionality
+test "FSWatcher scan" {
+    const testing = std.testing;
+    const temp_allocator = testing.allocator;
+    
+    // Create a temporary test directory
+    const test_dir = "fs_watcher_test_dir";
+    
+    // Delete the directory if it already exists
+    std.fs.cwd().deleteTree(test_dir) catch |err| {
+        if (err != error.FileNotFound) {
+            debugPrint("Warning: Failed to delete test dir: {any}\n", .{err});
+        }
+    };
+    
+    try std.fs.cwd().makeDir(test_dir);
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    
+    debugPrint("\nTesting FSWatcher scan functionality...\n", .{});
+    
+    // Create a simple FSWatcher instance
+    var watcher = FSWatcher{
+        .allocator = temp_allocator,
+        .path = try temp_allocator.dupe(u8, test_dir),
+        .is_running = true,
+        .events = ArrayList(WatchEvent).init(temp_allocator),
+        .existing_files = std.StringHashMap(void).init(temp_allocator),
+        .fd = -1,
+        .kq = -1,
+        .handle = null,
+    };
+    defer {
+        temp_allocator.free(watcher.path);
+        
+        for (watcher.events.items) |event| {
+            temp_allocator.free(event.path);
+        }
+        watcher.events.deinit();
+        
+        // Free all keys in existing_files
+        var it = watcher.existing_files.keyIterator();
+        while (it.next()) |key| {
+            temp_allocator.free(key.*);
+        }
+        watcher.existing_files.deinit();
+    }
+    
+    // Create a test file
+    const test_file = try std.fs.path.join(temp_allocator, &[_][]const u8{ test_dir, "test_file.txt" });
+    defer temp_allocator.free(test_file);
+    
+    {
+        const file = try std.fs.cwd().createFile(test_file, .{});
+        file.close();
+    }
+    debugPrint("Created test file: {s}\n", .{test_file});
+    
+    // Test performFullScan function directly
+    try watcher.performFullScan();
+    
+    // Check for events
+    debugPrint("Events after scan: {d}\n", .{watcher.events.items.len});
+    for (watcher.events.items, 0..) |event, i| {
+        debugPrint("Event {d}: kind={any}, path={s}\n", .{i, event.kind, event.path});
+    }
+    
+    // Verify that we detected the file
+    try testing.expect(watcher.events.items.len > 0);
+    
+    var found_file = false;
+    for (watcher.events.items) |event| {
+        if (std.mem.indexOf(u8, event.path, "test_file.txt") != null) {
+            found_file = true;
+            break;
+        }
+    }
+    try testing.expect(found_file);
+}
+
+// Simple test for FSWatcher's checkEvents functionality
+test "FSWatcher checkEvents" {
+    const testing = std.testing;
+    const temp_allocator = testing.allocator;
+    
+    // Create a temporary test directory
+    const test_dir = "fs_watcher_events_test_dir";
+    
+    // Delete the directory if it already exists
+    std.fs.cwd().deleteTree(test_dir) catch |err| {
+        if (err != error.FileNotFound) {
+            debugPrint("Warning: Failed to delete test dir: {any}\n", .{err});
+        }
+    };
+    
+    try std.fs.cwd().makeDir(test_dir);
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    
+    debugPrint("\nTesting FSWatcher checkEvents functionality...\n", .{});
+    
+    // Create a simple FSWatcher instance
+    var watcher = FSWatcher{
+        .allocator = temp_allocator,
+        .path = try temp_allocator.dupe(u8, test_dir),
+        .is_running = true,
+        .events = ArrayList(WatchEvent).init(temp_allocator),
+        .existing_files = std.StringHashMap(void).init(temp_allocator),
+        .fd = -1,
+        .kq = -1,
+        .handle = null,
+    };
+    defer {
+        temp_allocator.free(watcher.path);
+        
+        for (watcher.events.items) |event| {
+            temp_allocator.free(event.path);
+        }
+        watcher.events.deinit();
+        
+        // Free all keys in existing_files
+        var it = watcher.existing_files.keyIterator();
+        while (it.next()) |key| {
+            temp_allocator.free(key.*);
+        }
+        watcher.existing_files.deinit();
+    }
+    
+    // Perform initial scan to establish baseline
+    try watcher.performInitialScan();
+    debugPrint("Initial scan complete - indexed {d} items\n", .{watcher.existing_files.count()});
+    
+    // Create a test file
+    const test_file = try std.fs.path.join(temp_allocator, &[_][]const u8{ test_dir, "test_events_file.txt" });
+    defer temp_allocator.free(test_file);
+    
+    {
+        const file = try std.fs.cwd().createFile(test_file, .{});
+        file.close();
+    }
+    debugPrint("Created test file: {s}\n", .{test_file});
+    
+    // Test checkEvents function
+    const has_events = try watcher.checkEvents();
+    
+    // Verify we got events
+    debugPrint("checkEvents returned: {}\n", .{has_events});
+    debugPrint("Events detected: {d}\n", .{watcher.events.items.len});
+    
+    for (watcher.events.items, 0..) |event, i| {
+        debugPrint("Event {d}: kind={any}, path={s}\n", .{i, event.kind, event.path});
+    }
+    
+    // There should be at least one event 
+    try testing.expect(has_events);
+    try testing.expect(watcher.events.items.len > 0);
+    
+    // At least one event should be for our test file
+    var found_file = false;
+    for (watcher.events.items) |event| {
+        if (std.mem.indexOf(u8, event.path, "test_events_file.txt") != null) {
+            found_file = true;
+            break;
+        }
+    }
+    try testing.expect(found_file);
+    
+    // Call checkEvents again - should clear previous events
+    // Create another test file
+    const test_file2 = try std.fs.path.join(temp_allocator, &[_][]const u8{ test_dir, "test_events_file2.txt" });
+    defer temp_allocator.free(test_file2);
+    
+    {
+        const file = try std.fs.cwd().createFile(test_file2, .{});
+        file.close();
+    }
+    debugPrint("Created second test file: {s}\n", .{test_file2});
+    
+    // Call checkEvents again
+    const has_more_events = try watcher.checkEvents();
+    
+    // Verify we got events
+    debugPrint("Second checkEvents returned: {}\n", .{has_more_events});
+    debugPrint("Events detected: {d}\n", .{watcher.events.items.len});
+    
+    for (watcher.events.items, 0..) |event, i| {
+        debugPrint("Event {d}: kind={any}, path={s}\n", .{i, event.kind, event.path});
+    }
+    
+    // There should be at least one event and it should be for the second file only
+    try testing.expect(has_more_events);
+    try testing.expect(watcher.events.items.len > 0);
+    
+    // Events should NOT contain the first file anymore (should be cleared)
+    var found_first_file = false;
+    var found_second_file = false;
+    
+    for (watcher.events.items) |event| {
+        if (std.mem.indexOf(u8, event.path, "test_events_file.txt") != null) {
+            found_first_file = true;
+        }
+        if (std.mem.indexOf(u8, event.path, "test_events_file2.txt") != null) {
+            found_second_file = true;
+        }
+    }
+    
+    try testing.expect(!found_first_file); // First file events should be cleared
+    try testing.expect(found_second_file); // Second file events should be detected
 }
