@@ -17,6 +17,9 @@ This project is developed with the help of [Windsurf](https://www.windsurfrs.com
 
 ## Changelog
 
+### v0.0.6
+- Fix file change detection issue in watch mode
+
 ### v0.0.4
 
 - **Watch Mode**: Added new watch mode (`-t`) to continuously monitor source directory for changes
@@ -79,7 +82,6 @@ The compiled executable will be located at `./zig-out/bin/cryptbak`.
    - Compares with previous backup metadata (if exists)
    - Only encrypts new or modified files
    - Uses file content hash as backup filename, automatically deduplicating identical files
-   - Checks if other files reference the same content before deleting backup files
    - Updates metadata
    - Stores encrypted files in the `content` directory using content hash as filenames
 
@@ -105,18 +107,3 @@ The compiled executable will be located at `./zig-out/bin/cryptbak`.
 - No original filenames are exposed in the backup (filenames are hashed using MD5)
 - Directory structure is completely hidden, with all files stored flat in a content folder
 - All structural information is only available in the encrypted metadata
-
-## Testing
-
-The tool includes comprehensive integration tests for various scenarios:
-- Simple file encryption/decryption
-- Large files (10MB+)
-- Multi-level directory structures
-- Special filenames with spaces and special characters
-- Empty files and directories
-- Incremental backup functionality
-
-Run the tests using:
-```bash
-./test.sh
-```
