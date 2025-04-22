@@ -456,9 +456,14 @@ pub const FSWatcher = struct {
 
         // Create an empty changelist since we don't want to register new events
         var changelist = [_]std.c.Kevent{};
-
-        // Check for events - use null for timeout to make it non-blocking
-        const nevents = std.c.kevent(self.kq, &changelist, 0, &eventlist, eventlist.len, null);
+        debugPrint("#### start to poll kqueue events\n", .{});
+        
+        // Use a zero timeout to make it non-blocking
+        var zero_timeout: std.c.timespec = .{ .sec = 0, .nsec = 0 };
+        
+        // Check for events with zero timeout to make it truly non-blocking
+        const nevents = std.c.kevent(self.kq, &changelist, 0, &eventlist, eventlist.len, &zero_timeout);
+        debugPrint("#### finish polling kqueue events\n", .{});
         if (nevents < 0) {
             debugPrint("Failed to poll kqueue events\n", .{});
             return false;

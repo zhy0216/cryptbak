@@ -445,6 +445,9 @@ main() {
     # Run the selected test(s)
     echo -e "${YELLOW}Running tests: $test_to_run${NC}"
     
+    # Set up test environment before running integration tests
+    setup_test_environment
+    
     # First run unit tests unless specifically running a different test
     if [ "$test_to_run" == "all" ] || [ "$test_to_run" == "unit" ]; then
         if ! run_unit_tests; then
