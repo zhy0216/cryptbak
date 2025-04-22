@@ -1,0 +1,73 @@
+@startuml
+title cryptbak - Encryption Mode Flow
+
+start
+
+partition "Initialization" {
+  :Parse command line arguments;
+  :Derive cipher key from password;
+  
+  :Load existing metadata;
+  note right: If no metadata exists,\ncreate empty structure
+}
+
+partition "Source Analysis" {
+  :Scan source directory for files;
+  :Calculate content hash for each file;
+  :Create new metadata structure;
+  
+  :Compare with existing metadata;
+  
+  :Identify files to backup;
+  note right: New files\nor files with changed content
+  
+  :Identify content hashes to remove;
+  note right: Content hashes in metadata\nbut not in source
+}
+
+partition "Backup Process" {
+  :Create content directory if needed;
+  
+  repeat
+    :Get next file to backup;
+    :Read source file;
+    :Generate random nonce;
+    
+    :Create content-based filename;
+    note right: Filename = hex(content hash)
+    
+    :Encrypt file with ChaCha20;
+    note right: Using key + nonce
+    
+    :Write encrypted file to content directory;
+    
+    :Add file metadata to new metadata structure;
+  repeat while (More files to backup?) is (yes)
+  ->no;
+}
+
+partition "Cleanup Process" {
+  :Build hash reference count map;
+  
+  repeat
+    :Get next hash to check for removal;
+    
+    if (Hash used in current files?) then (yes)
+      :Skip removal;
+    else (no)
+      :Delete corresponding encrypted file;
+    endif
+  repeat while (More hashes to check?) is (yes)
+  ->no;
+}
+
+partition "Finalization" {
+  :Encrypt and save new metadata file;
+  note right: Same encryption key\nused for metadata
+  
+  :Free allocated resources;
+}
+
+stop
+
+@enduml
