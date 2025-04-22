@@ -45,7 +45,7 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
     // Use existing nonce or generate a new one
     var local_metadata = metadata;
     var metadata_nonce: [12]u8 = undefined;
-    
+
     if (local_metadata.metadata_nonce) |nonce| {
         metadata_nonce = nonce;
     } else {
@@ -71,7 +71,7 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
         full_salt = crypto_utils.generateRandomSalt();
         local_metadata.key_salt = full_salt;
     }
-    
+
     var enc_key: [32]u8 = undefined;
     try crypto_utils.deriveCipherKey(key[0..], full_salt, &enc_key);
 
@@ -191,8 +191,10 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     // Parse metadata basic information
     const version = std.mem.readInt(u32, header_buf[0..4], .little);
     const timestamp = std.mem.readInt(i64, header_buf[4..12], .little);
-    var full_salt: [16]u8 = undefined;
-    @memcpy(full_salt[0..], header_buf[12..28]);
+    
+    // Extract salt from header, but don't use it for key derivation again
+    var salt: [16]u8 = undefined;
+    @memcpy(salt[0..], header_buf[12..28]);
 
     debugPrint("Metadata: Version = {d}\n", .{version});
     debugPrint("Metadata: Timestamp = {d}\n", .{timestamp});
@@ -201,7 +203,7 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
         .version = version,
         .timestamp = timestamp,
         .files = ArrayList(FileMetadata).init(allocator),
-        .key_salt = full_salt,
+        .key_salt = salt,
     };
 
     // Read nonce
@@ -221,9 +223,8 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     }
     debugPrint("]\n", .{});
 
-    // Derive a new key for decryption using the salt
-    var dec_key: [32]u8 = undefined;
-    try crypto_utils.deriveCipherKey(key[0..], full_salt, &dec_key);
+    // Use the provided key directly - it's already derived
+    const dec_key = key;
 
     // Read the rest of the file
     const stat = try file.stat();
@@ -450,7 +451,12 @@ pub fn readMetadataSalt(allocator: Allocator, output_dir: []const u8) !?[16]u8 {
     // Extract salt from header
     var salt: [16]u8 = undefined;
     @memcpy(salt[0..], header_buf[12..28]);
-    
+    // print salt in hex
+    debugPrint("ReadMetadataSalt: Salt = [ ", .{});
+    for (salt) |b| {
+        debugPrint("{d} ", .{b});
+    }
+    debugPrint("]\n", .{});
     return salt;
 }
 

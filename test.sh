@@ -430,7 +430,7 @@ test_integrity_check() {
     
     # Verify integrity check output
     if grep -q "Recommendation: Run a full backup to restore consistency" /tmp/integrity_output.log; then
-        echo -e "${RED}Failed: Integrity check did not detect missing file${NC}"
+        echo -e "${RED}Failed: Integrity check detected missing file${NC}"
         cat /tmp/integrity_output.log
         return 1
     fi
