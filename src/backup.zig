@@ -14,17 +14,10 @@ const Config = config.Config;
 const BackupMetadata = metadata.BackupMetadata;
 const FileMetadata = metadata.FileMetadata;
 
-pub fn performBackup(
-    allocator: Allocator, 
-    conf: Config, 
-    key: [32]u8, 
-    existing_metadata: BackupMetadata
-) !void {
-    debugPrint("Performing backup of {s} to {s}\n", .{ 
-        conf.source_dir, 
-        conf.output_dir 
-    });
-    
+// 原始的performBackup函数，保留用于向后兼容
+pub fn performBackupLegacy(allocator: Allocator, conf: Config, key: [32]u8, existing_metadata: BackupMetadata) !void {
+    debugPrint("Performing backup of {s} to {s}\n", .{ conf.source_dir, conf.output_dir });
+
     // Scan source directory
     var current_files = ArrayList(FileMetadata).init(allocator);
     defer {
@@ -62,8 +55,8 @@ pub fn performBackup(
         // If it's a directory, don't create it in the backup structure, just record in metadata
         if (file.is_directory) {
             debugPrint("Recording directory in metadata (not creating in backup): {s}\n", .{file.path});
-            
-            // Add to metadata with a freshly allocated path 
+
+            // Add to metadata with a freshly allocated path
             var file_copy = file;
             file_copy.path = try allocator.dupe(u8, file.path);
             try new_metadata.files.append(file_copy);
@@ -77,7 +70,7 @@ pub fn performBackup(
                 debugPrint("New file: {s}\n", .{file.path});
                 break :blk true;
             }
-            
+
             const existing_file = existing_file_opt.?;
             if (!std.mem.eql(u8, &existing_file.hash, &file.hash) or existing_file.size != file.size) {
                 debugPrint("Changed file: {s}\n", .{file.path});
@@ -94,7 +87,7 @@ pub fn performBackup(
             // Get the content-based hash path
             const content_hashed_name = try crypto_utils.getContentHashedPath(allocator, file.hash);
             defer allocator.free(content_hashed_name);
-            
+
             const dest_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hashed_name });
             defer allocator.free(dest_path);
 
@@ -172,20 +165,17 @@ pub fn performBackup(
                     // Get content hash path
                     const content_hash = try crypto_utils.getContentHashedPath(allocator, existing_file.hash);
                     defer allocator.free(content_hash);
-                    
+
                     // Check if this content is referenced by other files
                     if (content_hash_map.get(content_hash)) |count| {
-                        debugPrint("File {s} content is still in use by {d} other files\n", .{file, count});
+                        debugPrint("File {s} content is still in use by {d} other files\n", .{ file, count });
                     } else {
                         // Content hash not used, remove the file
-                        const content_path = try fs.path.join(
-                            allocator, 
-                            &[_][]const u8{ conf.output_dir, "content", content_hash }
-                        );
+                        const content_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, "content", content_hash });
                         defer allocator.free(content_path);
-                        
+
                         fs.cwd().deleteFile(content_path) catch |err| {
-                            debugPrint("Warning: Failed to delete content file {s}: {any}\n", .{content_path, err});
+                            debugPrint("Warning: Failed to delete content file {s}: {any}\n", .{ content_path, err });
                         };
                     }
                 }
@@ -211,22 +201,22 @@ pub fn processBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
 pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_watcher.WatchEvent) !void {
     debugPrint("Performing backup of changed files...\n", .{});
     debugPrint("Number of change events to process: {d}\n", .{events.len});
-    
+
     // Log event details for debugging
     for (events) |event| {
-        debugPrint("Event detected - Path: {s}, Kind: {any}\n", .{event.path, event.kind});
+        debugPrint("Event detected - Path: {s}, Kind: {any}\n", .{ event.path, event.kind });
     }
-    
+
     // Use all-zero initial salt for key derivation, matching doDecrypt
     var initial_salt: [16]u8 = undefined;
     @memset(&initial_salt, 0); // Use all-zero salt for initialization
     var key: [32]u8 = undefined;
     try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
-    
+
     // Try to load existing metadata
     var empty_metadata = BackupMetadata.init(allocator);
     defer empty_metadata.deinit();
-    
+
     var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
         if (err == error.FileNotFound) {
             // If no metadata exists, do a full backup instead
@@ -236,7 +226,7 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
         return err;
     };
     defer existing_metadata.deinit();
-    
+
     return performBackup(allocator, conf, key, existing_metadata);
 }
 
@@ -244,7 +234,7 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
 fn hasParentInSet(changed_paths: *const StringHashMap(void), path: []const u8) bool {
     const parent_path = fs.path.dirname(path) orelse return false;
     if (parent_path.len == 0) return false;
-    
+
     return changed_paths.contains(parent_path);
 }
 
@@ -258,7 +248,7 @@ fn updateMetadataFile(new_metadata: *BackupMetadata, file: FileMetadata) void {
             return;
         }
     }
-    
+
     // If not found, append it
     new_metadata.files.append(file) catch |err| {
         debugPrint("Warning: Failed to append file to metadata: {any}\n", .{err});
@@ -269,21 +259,21 @@ fn detectChanges(allocator: Allocator, existing_metadata: *BackupMetadata, curre
     // Build a map of existing files for fast lookups
     var existing_files_map = StringHashMap(FileMetadata).init(allocator);
     defer existing_files_map.deinit();
-    
+
     for (existing_metadata.files.items) |file| {
         try existing_files_map.put(file.path, file);
     }
-    
+
     // Check for new or modified files
     for (current_files.items) |file| {
         const existing = existing_files_map.get(file.path);
-        
+
         if (existing == null) {
             // New file
             debugPrint("New file detected: {s}\n", .{file.path});
             return true;
         }
-        
+
         const existing_file = existing.?;
         if (!std.mem.eql(u8, &existing_file.hash, &file.hash) or existing_file.size != file.size) {
             // File has been modified
@@ -291,16 +281,16 @@ fn detectChanges(allocator: Allocator, existing_metadata: *BackupMetadata, curre
             return true;
         }
     }
-    
+
     // Check for deleted files
     const files_in_existing = existing_files_map.count();
     const files_in_current = current_files.items.len;
-    
+
     if (files_in_existing != files_in_current) {
-        debugPrint("Files deleted or count mismatch. Existing: {d}, Current: {d}\n", .{files_in_existing, files_in_current});
+        debugPrint("Files deleted or count mismatch. Existing: {d}, Current: {d}\n", .{ files_in_existing, files_in_current });
         return true;
     }
-    
+
     // No changes detected
     return false;
 }
@@ -377,55 +367,250 @@ pub fn doEncrypt(allocator: Allocator, conf: Config) !void {
     var key: [32]u8 = undefined;
     try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
 
-    // Try to load existing metadata
-    var empty_metadata = BackupMetadata.init(allocator);
-    defer empty_metadata.deinit();
-
+    // 1. Load existing metadata (if available) or create empty metadata
     var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
         if (err == error.FileNotFound) {
-            // If no metadata exists, return an empty one
-            return processBackup(allocator, conf, key, empty_metadata);
+            // If no metadata exists, create an empty one
+            const new_empty_metadata = BackupMetadata.init(allocator);
+            debugPrint("No existing metadata found, starting with empty metadata\n", .{});
+            return performBackup(allocator, conf, key, new_empty_metadata);
         }
         return err;
     };
     defer existing_metadata.deinit();
 
-    return processBackup(allocator, conf, key, existing_metadata);
+    return performBackup(allocator, conf, key, existing_metadata);
 }
 
-const fs_watcher = @import("fs_watcher.zig");
+// Refactored version of performBackup that clearly separates the backup process into steps
+pub fn performBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_metadata: BackupMetadata) !void {
+    debugPrint("Performing backup of {s} to {s}\n", .{ conf.source_dir, conf.output_dir });
+
+    // 2. Scan source directory to calculate new metadata
+    var current_files = ArrayList(FileMetadata).init(allocator);
+    defer {
+        // Free the path strings as they will be duplicated before adding to new_metadata
+        for (current_files.items) |file| {
+            allocator.free(file.path);
+        }
+        current_files.deinit();
+    }
+
+    try fs_utils.scanDirectory(allocator, conf.source_dir, conf.source_dir, &current_files);
+
+    // Build a map of existing files for fast lookups
+    var existing_files_map = StringHashMap(FileMetadata).init(allocator);
+    defer existing_files_map.deinit();
+
+    for (existing_metadata.files.items) |file| {
+        try existing_files_map.put(file.path, file);
+    }
+
+    // Create new metadata
+    var new_metadata = BackupMetadata.init(allocator);
+    defer new_metadata.deinit();
+
+    // 3. Compare metadata to identify files to backup and files to delete
+
+    // 3.1. Identify files to backup (new or changed files)
+    var files_to_backup = ArrayList(FileMetadata).init(allocator);
+    defer {
+        for (files_to_backup.items) |file| {
+            allocator.free(file.path);
+        }
+        files_to_backup.deinit();
+    }
+
+    for (current_files.items) |file| {
+        const existing_file_opt = existing_files_map.get(file.path);
+        var needs_update = false;
+
+        if (existing_file_opt == null) {
+            debugPrint("New file: {s}\n", .{file.path});
+            needs_update = true;
+        } else {
+            const existing_file = existing_file_opt.?;
+            if (!std.mem.eql(u8, &existing_file.hash, &file.hash) or existing_file.size != file.size) {
+                debugPrint("Changed file: {s}\n", .{file.path});
+                needs_update = true;
+            }
+        }
+
+        if (needs_update and !file.is_directory) {
+            var file_copy = file;
+            file_copy.path = try allocator.dupe(u8, file.path);
+            try files_to_backup.append(file_copy);
+        }
+
+        // Add to new metadata with a freshly allocated path
+        var file_copy = file;
+        file_copy.path = try allocator.dupe(u8, file.path);
+        try new_metadata.files.append(file_copy);
+    }
+
+    // 3.2. Identify files to remove (in backup but not in source)
+    // Instead of tracking files by path, we track by content hash
+    var hashes_in_source = StringHashMap(void).init(allocator);
+    defer {
+        var hash_key_iter = hashes_in_source.keyIterator();
+        while (hash_key_iter.next()) |hash_key| {
+            allocator.free(hash_key.*);
+        }
+        hashes_in_source.deinit();
+    }
+
+    // First, collect all content hashes in current source
+    for (current_files.items) |file| {
+        if (file.is_directory) continue;
+
+        const content_hash = try crypto_utils.getContentHashedPath(allocator, file.hash);
+        if (hashes_in_source.contains(content_hash)) {
+            // Hash already in map, free the duplicate
+            allocator.free(content_hash);
+        } else {
+            // Add new hash to map
+            try hashes_in_source.put(content_hash, {});
+        }
+    }
+
+    // Print all hashes in source for debugging
+    debugPrint("\n=== Content hashes in source ===\n", .{});
+    var source_hash_iter = hashes_in_source.keyIterator();
+    while (source_hash_iter.next()) |hash_key| {
+        debugPrint("Source hash: {s}\n", .{hash_key.*});
+    }
+
+    // Print all hashes in existing metadata for debugging
+    debugPrint("\n=== Content hashes in existing metadata ===\n", .{});
+    for (existing_metadata.files.items) |file| {
+        if (file.is_directory) continue;
+
+        const content_hash = try crypto_utils.getContentHashedPath(allocator, file.hash);
+        debugPrint("Existing metadata hash: {s}\n", .{content_hash});
+        allocator.free(content_hash);
+    }
+
+    // Now find content hashes in existing metadata that don't exist in source
+    var content_to_remove = ArrayList([]const u8).init(allocator);
+    defer {
+        for (content_to_remove.items) |hash| {
+            allocator.free(hash);
+        }
+        content_to_remove.deinit();
+    }
+
+    for (existing_metadata.files.items) |file| {
+        if (file.is_directory) continue;
+
+        const content_hash = try crypto_utils.getContentHashedPath(allocator, file.hash);
+        debugPrint("\n=== content_hash: {s} ===\n", .{content_hash});
+
+        if (!hashes_in_source.contains(content_hash)) {
+            // This hash is no longer used in source, mark for removal
+            try content_to_remove.append(content_hash);
+        } else {
+            // Hash is still in use, free it
+            allocator.free(content_hash);
+        }
+    }
+
+    // 4. Execute backup and cleanup operations
+
+    // 4.1. Ensure the content directory exists
+    const content_dir = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, "content" });
+    defer allocator.free(content_dir);
+    try fs.cwd().makePath(content_dir);
+
+    // 4.2. Backup files (encrypt new or changed files)
+    for (files_to_backup.items) |file| {
+        const source_path = try fs.path.join(allocator, &[_][]const u8{ conf.source_dir, file.path });
+        defer allocator.free(source_path);
+
+        var nonce: [12]u8 = undefined;
+        std.crypto.random.bytes(&nonce);
+
+        // Get the content-based hash path
+        const content_hashed_name = try crypto_utils.getContentHashedPath(allocator, file.hash);
+        defer allocator.free(content_hashed_name);
+
+        const dest_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hashed_name });
+        defer allocator.free(dest_path);
+
+        try crypto_utils.encryptFile(source_path, dest_path, key, nonce);
+    }
+
+    // Create a map to track which content hashes are still in use
+    var content_hash_map = StringHashMap(u32).init(allocator);
+    defer {
+        var hash_iter = content_hash_map.keyIterator();
+        while (hash_iter.next()) |hash_key| {
+            allocator.free(hash_key.*);
+        }
+        content_hash_map.deinit();
+    }
+
+    // Count references to each content hash in the new metadata
+    for (new_metadata.files.items) |file| {
+        if (file.is_directory) continue;
+
+        const content_hash = try crypto_utils.getContentHashedPath(allocator, file.hash);
+
+        if (content_hash_map.get(content_hash)) |count| {
+            try content_hash_map.put(content_hash, count + 1);
+            allocator.free(content_hash); // Free duplicate hash since we didn't store it
+        } else {
+            // First reference to this hash - we transfer ownership of content_hash to the map
+            try content_hash_map.put(content_hash, 1);
+        }
+    }
+
+    // 4.3. Process files to remove (clean up deleted files)
+    for (content_to_remove.items) |content_hash| {
+        debugPrint("Checking if we can remove deleted file: {s}\n", .{content_hash});
+        const content_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hash });
+        defer allocator.free(content_path);
+
+        fs.cwd().deleteFile(content_path) catch |err| {
+            debugPrint("Warning: Failed to delete content file {s}: {any}\n", .{ content_path, err });
+        };
+    }
+
+    // 5. Save new metadata
+    try metadata.saveMetadata(allocator, new_metadata, conf.output_dir, key);
+    debugPrint("Backup completed successfully!\n", .{});
+}
 
 pub fn doWatch(allocator: Allocator, conf: Config) !void {
     debugPrint("Starting watch mode on {s}\n", .{conf.source_dir});
     debugPrint("Minimum backup period: {d} seconds\n", .{conf.min_backup_period});
-    
+
     // Initial backup
     try doEncrypt(allocator, conf);
-    
+
     // Set up a timer to track when we last performed a backup
     var last_backup_time = std.time.milliTimestamp();
     var changes_detected = false;
-    
+
     // Initialize file system watcher
     debugPrint("Initializing file system watcher...\n", .{});
     var watcher_result = try fs_watcher.createWatcher(allocator, conf.source_dir);
-    
+
     // Start watching
     switch (watcher_result) {
         .FSWatcher => |*native_watcher| {
             defer native_watcher.deinit();
             try native_watcher.start();
             debugPrint("Using native file system notifications\n", .{});
-            
+
             while (true) {
                 // Check for file system events
                 changes_detected = try native_watcher.checkEvents();
-                
+
                 // If changes detected and minimum backup period has passed
                 const current_time = std.time.milliTimestamp();
                 const elapsed_ms = current_time - last_backup_time;
                 const min_period_ms = conf.min_backup_period * std.time.ms_per_s;
-                
+
                 if (changes_detected and elapsed_ms >= min_period_ms) {
                     debugPrint("Changes detected, performing partial backup...\n", .{});
                     try doPartialBackup(allocator, conf, native_watcher.events.items);
@@ -433,14 +618,14 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
                     changes_detected = false;
                 } else if (changes_detected) {
                     debugPrint("Changes detected, but waiting for minimum backup period ({d} seconds)...\n", .{conf.min_backup_period});
-                    
+
                     // Continue checking until minimum period has passed
                     while (true) {
                         std.time.sleep(std.time.ns_per_s); // 1 second sleep
-                        
+
                         const check_time = std.time.milliTimestamp();
                         const check_elapsed = check_time - last_backup_time;
-                        
+
                         if (check_elapsed >= min_period_ms) {
                             debugPrint("Minimum period reached, performing partial backup...\n", .{});
                             try doPartialBackup(allocator, conf, native_watcher.events.items);
@@ -450,7 +635,7 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
                         }
                     }
                 }
-                
+
                 // Small sleep to prevent high CPU usage
                 std.time.sleep(std.time.ns_per_s / 10); // 100ms sleep
             }
@@ -459,16 +644,16 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
             defer polling_watcher.deinit();
             try polling_watcher.start();
             debugPrint("Using polling-based file system monitoring\n", .{});
-            
+
             while (true) {
                 // Check for file system events
                 changes_detected = try polling_watcher.checkEvents();
-                
+
                 // If changes detected and minimum backup period has passed
                 const current_time = std.time.milliTimestamp();
                 const elapsed_ms = current_time - last_backup_time;
                 const min_period_ms = conf.min_backup_period * std.time.ms_per_s;
-                
+
                 if (changes_detected and elapsed_ms >= min_period_ms) {
                     debugPrint("Changes detected, performing partial backup...\n", .{});
                     try doPartialBackup(allocator, conf, polling_watcher.events.items);
@@ -476,14 +661,14 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
                     changes_detected = false;
                 } else if (changes_detected) {
                     debugPrint("Changes detected, but waiting for minimum backup period ({d} seconds)...\n", .{conf.min_backup_period});
-                    
+
                     // Continue checking until minimum period has passed
                     while (true) {
                         std.time.sleep(std.time.ns_per_s); // 1 second sleep
-                        
+
                         const check_time = std.time.milliTimestamp();
                         const check_elapsed = check_time - last_backup_time;
-                        
+
                         if (check_elapsed >= min_period_ms) {
                             debugPrint("Minimum period reached, performing partial backup...\n", .{});
                             try doPartialBackup(allocator, conf, polling_watcher.events.items);
@@ -493,10 +678,12 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
                         }
                     }
                 }
-                
+
                 // Small sleep to prevent high CPU usage
                 std.time.sleep(std.time.ns_per_s * 2); // 2 second polling interval
             }
         },
     }
 }
+
+const fs_watcher = @import("fs_watcher.zig");

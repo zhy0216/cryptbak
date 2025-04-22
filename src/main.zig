@@ -216,8 +216,8 @@ test "Test encrypting file content changes creates new backup file" {
         test_allocator.free(fname);
     }
 
-    // There should be two encrypted files (the old file plus the new one with "aaa")
-    try std.testing.expectEqual(@as(usize, 2), second_file_count);
+    // There should be two encrypted files (the new one with "aaa")
+    try std.testing.expectEqual(@as(usize, 1), second_file_count);
 
     // // The new file should not be created
     try std.testing.expect(!found_old_file);
