@@ -14,8 +14,8 @@ const Config = config.Config;
 const BackupMetadata = metadata.BackupMetadata;
 const FileMetadata = metadata.FileMetadata;
 
-pub fn processBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_metadata: BackupMetadata) !void {
-    return performBackup(allocator, conf, key, existing_metadata);
+pub fn processBackup(allocator: Allocator, conf: Config, derivedKey: [32]u8, existing_metadata: BackupMetadata) !void {
+    return performBackup(allocator, conf, derivedKey, existing_metadata);
 }
 
 pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_watcher.WatchEvent) !void {
@@ -30,11 +30,11 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
     // Read salt from metadata file, same as in doEncrypt
     const salt_opt = try metadata.readMetadataSalt(allocator, conf.output_dir);
 
-    var key: [32]u8 = undefined;
+    var derivedKey: [32]u8 = undefined;
     if (salt_opt) |salt| {
         // If salt exists, use it to derive the key
         debugPrint("Found existing salt in metadata\n", .{});
-        try crypto_utils.deriveCipherKey(conf.password, salt, &key);
+        try crypto_utils.deriveCipherKey(conf.password, salt, &derivedKey);
     } else {
         // If no metadata exists, do a full backup instead
         debugPrint("No existing metadata found, performing full backup instead\n", .{});
@@ -42,7 +42,7 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
     }
 
     // Try to load existing metadata
-    var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
+    var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, derivedKey) catch |err| {
         if (err == error.FileNotFound) {
             // If no metadata exists, do a full backup instead
             debugPrint("No existing metadata found, performing full backup instead\n", .{});
@@ -52,7 +52,7 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
     };
     defer existing_metadata.deinit();
 
-    return performBackup(allocator, conf, key, existing_metadata);
+    return performBackup(allocator, conf, derivedKey, existing_metadata);
 }
 
 // Helper function to check if a file's parent directory is in the changed paths set
@@ -134,11 +134,11 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
     }
 
     // Derive key using the read salt
-    var key: [32]u8 = undefined;
-    try crypto_utils.deriveCipherKey(conf.password, salt_opt.?, &key);
+    var derivedKey: [32]u8 = undefined;
+    try crypto_utils.deriveCipherKey(conf.password, salt_opt.?, &derivedKey);
 
     // Load metadata
-    var meta = try metadata.loadMetadata(allocator, conf.source_dir, key);
+    var meta = try metadata.loadMetadata(allocator, conf.source_dir, derivedKey);
     defer meta.deinit();
 
     // Get content directory path
@@ -179,7 +179,7 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
             try fs.cwd().makePath(dest_dir);
         }
 
-        try crypto_utils.decryptFile(source_path, dest_path, key);
+        try crypto_utils.decryptFile(source_path, dest_path, derivedKey);
     }
 
     debugPrint("Decryption completed successfully!\n", .{});
@@ -194,14 +194,14 @@ pub fn doEncrypt(allocator: Allocator, conf: Config) !void {
     // 1. Try to read salt from metadata file
     const salt_opt = try metadata.readMetadataSalt(allocator, conf.output_dir);
 
-    var key: [32]u8 = undefined;
+    var derivedKey: [32]u8 = undefined;
     if (salt_opt) |salt| {
         // If salt exists, use it to derive the key
         debugPrint("Found existing salt in metadata\n", .{});
-        try crypto_utils.deriveCipherKey(conf.password, salt, &key);
+        try crypto_utils.deriveCipherKey(conf.password, salt, &derivedKey);
 
         // Try to load complete metadata
-        var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
+        var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, derivedKey) catch |err| {
             // If decryption fails, password might be wrong
             debugPrint("Warning: Failed to decrypt metadata: {s}\n", .{@errorName(err)});
             return err;
@@ -219,7 +219,7 @@ pub fn doEncrypt(allocator: Allocator, conf: Config) !void {
             existing_metadata.key_salt = salt;
         }
 
-        return performBackup(allocator, conf, key, existing_metadata);
+        return performBackup(allocator, conf, derivedKey, existing_metadata);
     } else {
         // If salt doesn't exist, create new metadata and salt
         var new_empty_metadata = BackupMetadata.init(allocator);
@@ -229,15 +229,15 @@ pub fn doEncrypt(allocator: Allocator, conf: Config) !void {
         new_empty_metadata.key_salt = new_salt;
 
         // Derive key using new salt
-        try crypto_utils.deriveCipherKey(conf.password, new_salt, &key);
+        try crypto_utils.deriveCipherKey(conf.password, new_salt, &derivedKey);
 
         debugPrint("No existing metadata found, starting with empty metadata and new salt\n", .{});
-        return performBackup(allocator, conf, key, new_empty_metadata);
+        return performBackup(allocator, conf, derivedKey, new_empty_metadata);
     }
 }
 
 // Refactored version of performBackup that clearly separates the backup process into steps
-pub fn performBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_metadata: BackupMetadata) !void {
+pub fn performBackup(allocator: Allocator, conf: Config, derivedKey: [32]u8, existing_metadata: BackupMetadata) !void {
     debugPrint("Performing backup of {s} to {s}\n", .{ conf.source_dir, conf.output_dir });
 
     // 2. Scan source directory to calculate new metadata
@@ -262,6 +262,9 @@ pub fn performBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
 
     // Create new metadata
     var new_metadata = BackupMetadata.init(allocator);
+    new_metadata.key_salt = existing_metadata.key_salt;
+    new_metadata.metadata_nonce = existing_metadata.metadata_nonce;
+
     defer new_metadata.deinit();
 
     // 3. Compare metadata to identify files to backup and files to delete
@@ -393,7 +396,7 @@ pub fn performBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
         const dest_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hashed_name });
         defer allocator.free(dest_path);
 
-        try crypto_utils.encryptFile(source_path, dest_path, key, nonce);
+        try crypto_utils.encryptFile(source_path, dest_path, derivedKey, nonce);
     }
 
     // Create a map to track which content hashes are still in use
@@ -433,7 +436,7 @@ pub fn performBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
     }
 
     // 5. Save new metadata
-    try metadata.saveMetadata(allocator, new_metadata, conf.output_dir, key);
+    try metadata.saveMetadata(allocator, new_metadata, conf.output_dir, derivedKey);
     debugPrint("Backup completed successfully!\n", .{});
 }
 
@@ -557,13 +560,13 @@ pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
     }
 
     // Derive key using the read salt
-    var key: [32]u8 = undefined;
-    try crypto_utils.deriveCipherKey(conf.password, salt_opt.?, &key);
+    var derivedKey: [32]u8 = undefined;
+    try crypto_utils.deriveCipherKey(conf.password, salt_opt.?, &derivedKey);
 
     // Try to load existing metadata
     var existing_metadata: BackupMetadata = undefined;
 
-    existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
+    existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, derivedKey) catch |err| {
         debugPrint("Warning: Potential metadata issue detected: {s}\n", .{@errorName(err)});
 
         // Create and save a new empty metadata as a fallback
@@ -594,7 +597,7 @@ pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
         }
 
         // Save the new empty metadata file
-        try metadata.saveMetadata(allocator, new_empty_metadata, conf.output_dir, key);
+        try metadata.saveMetadata(allocator, new_empty_metadata, conf.output_dir, derivedKey);
         std.debug.print("Created new metadata file due to corruption of the original\n", .{});
 
         // Only recommend backup if there are content files
@@ -619,6 +622,8 @@ pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
 
     // Create a copy of metadata for tracking missing files
     var new_metadata = BackupMetadata.init(allocator);
+    new_metadata.key_salt = existing_metadata.key_salt;
+    new_metadata.metadata_nonce = existing_metadata.metadata_nonce;
     defer new_metadata.deinit();
 
     // Track files that were found to be missing
@@ -679,7 +684,7 @@ pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
 
         // Save the updated metadata without the missing files
         debugPrint("\nUpdating metadata to remove missing files...\n", .{});
-        try metadata.saveMetadata(allocator, new_metadata, conf.output_dir, key);
+        try metadata.saveMetadata(allocator, new_metadata, conf.output_dir, derivedKey);
         debugPrint("Metadata updated successfully. Re-run backup to restore missing files.\n", .{});
     } else {
         debugPrint("\nIntegrity check completed successfully!\n", .{});

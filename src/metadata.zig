@@ -72,8 +72,8 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
         local_metadata.key_salt = full_salt;
     }
 
-    var enc_key: [32]u8 = undefined;
-    try crypto_utils.deriveCipherKey(key[0..], full_salt, &enc_key);
+    // Use the provided key directly - it's already derived
+    const enc_key = key;
 
     // Write metadata header
     const marker = "CRYPTBAK";
@@ -153,6 +153,7 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
     // Use a fixed counter value
     const counter: u32 = 0;
     debugPrint("SaveMetadata: Encrypting with counter = {d}\n", .{counter});
+    debugPrint("SaveMetadata: enc_key, metadata_nonce: {s}, {s}\n", .{ enc_key, metadata_nonce });
 
     crypto_utils.encrypt(encrypted_buffer, buffer.items, counter, enc_key, metadata_nonce);
 
@@ -191,7 +192,7 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     // Parse metadata basic information
     const version = std.mem.readInt(u32, header_buf[0..4], .little);
     const timestamp = std.mem.readInt(i64, header_buf[4..12], .little);
-    
+
     // Extract salt from header, but don't use it for key derivation again
     var salt: [16]u8 = undefined;
     @memcpy(salt[0..], header_buf[12..28]);
@@ -256,6 +257,7 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     // Use the same counter value as for encryption
     const counter: u32 = 0;
     debugPrint("LoadMetadata: Decrypting with counter = {d}\n", .{counter});
+    debugPrint("LoadMetadata: dec_key, metadata_nonce: {s}, {s}\n", .{ dec_key, metadata_nonce });
 
     crypto_utils.decrypt(decrypted_buffer, encrypted_buffer, counter, dec_key, metadata_nonce);
 
@@ -492,7 +494,6 @@ test "metadata serialization and deserialization" {
     var metadata = BackupMetadata.init(allocator);
     defer metadata.deinit();
 
-    // Add a few test files
     const test_path1 = try allocator.dupe(u8, "test_file1.txt");
     try metadata.files.append(FileMetadata{
         .path = test_path1,
@@ -511,18 +512,25 @@ test "metadata serialization and deserialization" {
         .is_directory = true,
     });
 
-    // Set a test password
-    const test_password = "test_password";
-    var key: [32]u8 = undefined;
-    var initial_salt: [16]u8 = undefined;
-    @memset(&initial_salt, 0);
-    try crypto_utils.deriveCipherKey(test_password, initial_salt, &key);
+    // Create a base key and derive an encryption key to use
+    var base_key: [32]u8 = undefined;
+    @memset(&base_key, 1); // Use any value, just for testing
 
-    // Save metadata to the temp directory
-    try saveMetadata(allocator, metadata, tmp_path, key);
+    // Generate a random salt
+    const salt = crypto_utils.generateRandomSalt();
 
-    // Load back the metadata
-    var loaded_metadata = try loadMetadata(allocator, tmp_path, key);
+    // Derive the encryption key first - this matches the new expected behavior
+    var enc_key: [32]u8 = undefined;
+    try crypto_utils.deriveCipherKey(base_key[0..], salt, &enc_key);
+
+    // Set the salt in the metadata
+    metadata.key_salt = salt;
+
+    // Save metadata to the temp directory with the already derived key
+    try saveMetadata(allocator, metadata, tmp_path, enc_key);
+
+    // Load back the metadata with the same key
+    var loaded_metadata = try loadMetadata(allocator, tmp_path, enc_key);
     defer loaded_metadata.deinit();
 
     // Verify the loaded metadata
@@ -557,18 +565,25 @@ test "metadata with empty file list" {
     var metadata = BackupMetadata.init(allocator);
     defer metadata.deinit();
 
-    // Set a test password
-    const test_password = "test_password";
-    var key: [32]u8 = undefined;
-    var initial_salt: [16]u8 = undefined;
-    @memset(&initial_salt, 0);
-    try crypto_utils.deriveCipherKey(test_password, initial_salt, &key);
+    // Create a base key and derive an encryption key to use
+    var base_key: [32]u8 = undefined;
+    @memset(&base_key, 1); // Use any value, just for testing
 
-    // Save metadata to the temp directory
-    try saveMetadata(allocator, metadata, tmp_path, key);
+    // Generate a random salt
+    const salt = crypto_utils.generateRandomSalt();
 
-    // Load back the metadata
-    var loaded_metadata = try loadMetadata(allocator, tmp_path, key);
+    // Derive the encryption key first - this matches the new expected behavior
+    var enc_key: [32]u8 = undefined;
+    try crypto_utils.deriveCipherKey(base_key[0..], salt, &enc_key);
+
+    // Set the salt in the metadata
+    metadata.key_salt = salt;
+
+    // Save metadata to the temp directory with the already derived key
+    try saveMetadata(allocator, metadata, tmp_path, enc_key);
+
+    // Load back the metadata with the same key
+    var loaded_metadata = try loadMetadata(allocator, tmp_path, enc_key);
     defer loaded_metadata.deinit();
 
     // Verify the loaded metadata
@@ -603,18 +618,25 @@ test "metadata with special characters in file paths" {
         .is_directory = false,
     });
 
-    // Set a test password
-    const test_password = "test_password";
-    var key: [32]u8 = undefined;
-    var initial_salt: [16]u8 = undefined;
-    @memset(&initial_salt, 0);
-    try crypto_utils.deriveCipherKey(test_password, initial_salt, &key);
+    // Create a base key and derive an encryption key to use
+    var base_key: [32]u8 = undefined;
+    @memset(&base_key, 1); // Use any value, just for testing
 
-    // Save metadata to the temp directory
-    try saveMetadata(allocator, metadata, tmp_path, key);
+    // Generate a random salt
+    const salt = crypto_utils.generateRandomSalt();
 
-    // Load back the metadata
-    var loaded_metadata = try loadMetadata(allocator, tmp_path, key);
+    // Derive the encryption key first - this matches the new expected behavior
+    var enc_key: [32]u8 = undefined;
+    try crypto_utils.deriveCipherKey(base_key[0..], salt, &enc_key);
+
+    // Set the salt in the metadata
+    metadata.key_salt = salt;
+
+    // Save metadata to the temp directory with the already derived key
+    try saveMetadata(allocator, metadata, tmp_path, enc_key);
+
+    // Load back the metadata with the same key
+    var loaded_metadata = try loadMetadata(allocator, tmp_path, enc_key);
     defer loaded_metadata.deinit();
 
     // Verify the special path was preserved
