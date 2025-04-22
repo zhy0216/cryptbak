@@ -282,7 +282,13 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
         const path_len = std.mem.readInt(u64, &path_len_bytes, .little);
         if (path_len > 32768) { // Sanity check for path length
             debugPrint("Suspicious path length for file {d}: {d} bytes\n", .{ i, path_len });
-            return error.InvalidMetadataFile;
+            return error.InvalidMetadataFilePath;
+        }
+
+        // Additional sanity check - path length should be non-zero
+        if (path_len == 0) {
+            debugPrint("Invalid zero path length for file {d}\n", .{i});
+            return error.InvalidMetadataFilePath;
         }
 
         const path = try allocator.alloc(u8, path_len);
@@ -298,6 +304,15 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
             debugPrint("Incomplete path read for file {d}: got {d} of {d} bytes\n", .{ i, path_read, path_len });
             allocator.free(path);
             return error.InvalidMetadataFile;
+        }
+
+        // Validate that path contains only valid characters
+        for (path) |char| {
+            if (char == 0) { // Null character in path
+                debugPrint("Invalid null character in path for file {d}\n", .{i});
+                allocator.free(path);
+                return error.InvalidMetadataFilePath;
+            }
         }
 
         // Read last modified time
@@ -331,6 +346,13 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
         }
 
         const size = std.mem.readInt(u64, &size_bytes, .little);
+
+        // Sanity check for file size
+        if (size > 1024 * 1024 * 1024 * 100) { // 100 GB max file size
+            debugPrint("Suspicious file size for file {d}: {d} bytes\n", .{ i, size });
+            allocator.free(path);
+            return error.InvalidMetadataFileSize;
+        }
 
         var hash: [32]u8 = undefined;
         const hash_read = reader.read(&hash) catch |err| {

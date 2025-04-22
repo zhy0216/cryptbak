@@ -692,43 +692,15 @@ const fs_watcher = @import("fs_watcher.zig");
 pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
     debugPrint("Checking backup integrity for {s}\n", .{conf.output_dir});
 
-    // Get the key from the password
-    var salt: [16]u8 = undefined;
+    // Derive encryption key from password
     var key: [32]u8 = undefined;
-
-    // First try to get the salt from the existing metadata
-    const metadata_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, ".cryptbak.meta" });
-    defer allocator.free(metadata_path);
-
-    // Open the metadata file
-    var meta_file = fs.cwd().openFile(metadata_path, .{}) catch |err| {
-        debugPrint("Error: Cannot open metadata file: {s}\n", .{@errorName(err)});
-        return error.NoMetadataFile;
-    };
-    defer meta_file.close();
-
-    // Read the header to get the salt
-    var marker_buf: [8]u8 = undefined;
-    const marker_read = try meta_file.read(&marker_buf);
-    if (marker_read != 8 or !std.mem.eql(u8, &marker_buf, "CRYPTBAK")) {
-        debugPrint("Error: Invalid metadata file format\n", .{});
-        return error.InvalidMetadataFile;
-    }
-
-    var header_buf: [32]u8 = undefined;
-    const header_read = try meta_file.read(&header_buf);
-    if (header_read != 32) {
-        debugPrint("Error: Incomplete metadata header\n", .{});
-        return error.InvalidMetadataFile;
-    }
-
-    // Extract salt from header
-    @memcpy(salt[0..], header_buf[12..28]);
-
+    const salt = crypto_utils.generateRandomSalt();
     try crypto_utils.deriveCipherKey(conf.password, salt, &key);
 
     // Try to load existing metadata
-    var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
+    var existing_metadata: BackupMetadata = undefined;
+
+    existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
         debugPrint("Warning: Potential metadata issue detected: {s}\n", .{@errorName(err)});
 
         // Create and save a new empty metadata as a fallback
@@ -745,12 +717,30 @@ pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
             return error.ContentDirectoryMissing;
         };
 
+        // Check if there are any content files
+        var content_dir_handle = try fs.cwd().openDir(content_dir, .{ .iterate = true });
+        defer content_dir_handle.close();
+
+        var has_content_files = false;
+        var dir_it = content_dir_handle.iterate();
+        while (try dir_it.next()) |entry| {
+            if (entry.kind == .file) {
+                has_content_files = true;
+                break;
+            }
+        }
+
         // Save the new empty metadata file
         try metadata.saveMetadata(allocator, new_empty_metadata, conf.output_dir, key);
         std.debug.print("Created new metadata file due to corruption of the original\n", .{});
-        std.debug.print("Recommendation: Run a full backup to restore consistency\n", .{});
+
+        // Only recommend backup if there are content files
+        if (has_content_files) {
+            std.debug.print("Recommendation: Run a full backup to restore consistency\n", .{});
+        }
         return;
     };
+
     defer existing_metadata.deinit();
 
     debugPrint("Loaded metadata with {d} files\n", .{existing_metadata.files.items.len});
