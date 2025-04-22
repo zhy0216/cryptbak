@@ -18,7 +18,7 @@ TEST_PASSWORD="test_password_123"
 mkdir -p "$TEST_DIR"
 
 # Available tests
-AVAILABLE_TESTS=("unit" "encrypt" "decrypt" "incremental" "watch")
+AVAILABLE_TESTS=("unit" "encrypt" "decrypt" "incremental" "watch" "integrity")
 
 # Function to print usage information
 print_usage() {
@@ -29,6 +29,7 @@ print_usage() {
     echo -e "  decrypt     - Test file decryption"
     echo -e "  incremental - Test incremental backup"
     echo -e "  watch       - Test watch mode"
+    echo -e "  integrity  - Test integrity check mode"
     echo -e "  all         - Run all tests (default)"
     echo -e "  help        - Show this help message"
 }
@@ -312,7 +313,7 @@ test_watch_mode() {
     if [ -d "$BACKUP_DIR/content" ]; then
         initial_content_files_count=$(find "$BACKUP_DIR/content" -type f | wc -l)
     fi
-    echo "Initial content files count: $initial_content_files_count"
+    echo "Initial backup contains $initial_content_files_count content files"
     
     # Record file stats before starting watch mode
     echo "Recording initial file stats..."
@@ -394,6 +395,119 @@ test_watch_mode() {
     fi
     
     echo -e "${GREEN}Test 4 passed: Watch mode successfully detected and backed up new files and content changes${NC}"
+    return 0
+}
+
+# Test integrity check mode
+test_integrity_check() {
+    echo -e "\n${YELLOW}Test 5: Integrity Check Mode${NC}"
+    
+    # Setup a clean test environment specifically for integrity check
+    local integrity_source="$TEST_BASE/integrity_source"
+    local integrity_backup="$TEST_BASE/integrity_backup"
+    
+    # Create minimal test directories
+    mkdir -p "$integrity_source"
+    mkdir -p "$integrity_backup"
+    
+    # Create a simple test file with known content
+    echo "First test file for integrity check" > "$integrity_source/test1.txt"
+    echo "Second test file for integrity check" > "$integrity_source/test2.txt"
+    
+    # Perform initial backup
+    echo "Setting up initial backup for integrity test..."
+    run_cmd "$CRYPTBAK_BIN" "$integrity_source" "$integrity_backup" -p "$TEST_PASSWORD" || return 1
+    
+    # Count the files in content directory
+    local content_files=$(find "$integrity_backup/content" -type f | sort)
+    local file_count=$(echo "$content_files" | wc -l | tr -d ' ')
+    echo "Backup contains $file_count content files"
+    
+    # There should be 2 content files
+    if [ "$file_count" -ne 2 ]; then
+        echo -e "${RED}Failed: Expected 2 content files, found $file_count${NC}"
+        return 1
+    fi
+    
+    # Get the list of files in the content directory
+    local first_file=$(echo "$content_files" | head -n 1)
+    
+    echo "Backing up metadata file before deletion..."
+    cp "$integrity_backup/.cryptbak.meta" "$integrity_backup/.cryptbak.meta.backup"
+    
+    echo "Selected file to delete: $first_file"
+    rm -f "$first_file"
+    
+    # Perform integrity check
+    echo "Running integrity check..."
+    run_cmd "$CRYPTBAK_BIN" "$integrity_source" "$integrity_backup" -c -p "$TEST_PASSWORD" > /tmp/integrity_output.log 2>&1 || {
+        echo -e "${RED}Failed: Integrity check returned an error${NC}"
+        cat /tmp/integrity_output.log
+        return 1
+    }
+    
+    # Verify integrity check output
+    if ! grep -q "Recommendation: Run a full backup to restore consistency" /tmp/integrity_output.log; then
+        echo -e "${RED}Failed: Integrity check did not detect missing file${NC}"
+        cat /tmp/integrity_output.log
+        return 1
+    fi
+    
+    # After integrity check, remove the corrupted metadata file to simulate a clean backup
+    echo "Removing metadata file for clean backup..."
+    rm -f "$integrity_backup/.cryptbak.meta"
+    
+    # Run a new backup and verify it creates all files
+    echo "Running clean backup after integrity check..."
+    run_cmd "$CRYPTBAK_BIN" "$integrity_source" "$integrity_backup" -p "$TEST_PASSWORD" || return 1
+    
+    # Verify the file count is correct
+    local final_count=$(find "$integrity_backup/content" -type f | wc -l)
+    
+    # The count should be back to 2
+    if [ "$final_count" -ne 2 ]; then
+        echo -e "${RED}Failed: Backup after integrity check did not restore all files${NC}"
+        echo "Expected 2 files, found $final_count"
+        return 1
+    fi
+
+    # Test decrypting the backup files to verify they're valid
+    echo "Testing decryption of backed up files..."
+    local restore_dir="$TEST_BASE/integrity_restore"
+    mkdir -p "$restore_dir"
+    
+    # Run decrypt mode
+    run_cmd "$CRYPTBAK_BIN" "$integrity_backup" "$restore_dir" -d -p "$TEST_PASSWORD" || {
+        echo -e "${RED}Failed: Could not decrypt backup files${NC}"
+        return 1
+    }
+    
+    # Verify the decrypted files exist and have the right content
+    if [ ! -f "$restore_dir/test1.txt" ] || [ ! -f "$restore_dir/test2.txt" ]; then
+        echo -e "${RED}Failed: Not all files were decrypted${NC}"
+        return 1
+    fi
+    
+    # Verify content of decrypted files
+    if ! grep -q "First test file for integrity check" "$restore_dir/test1.txt"; then
+        echo -e "${RED}Failed: First decrypted file has incorrect content${NC}"
+        return 1
+    fi
+    
+    if ! grep -q "Second test file for integrity check" "$restore_dir/test2.txt"; then
+        echo -e "${RED}Failed: Second decrypted file has incorrect content${NC}"
+        return 1
+    fi
+    
+    echo "Decryption successful, files contain correct content"
+    
+    # Restore the original file structure for any subsequent tests
+    echo "Cleaning up test environment..."
+    rm -rf "$integrity_source"
+    rm -rf "$integrity_backup"
+    rm -rf "$restore_dir"
+    
+    echo -e "${GREEN}Test 5 passed: Integrity check successfully detected missing file and files can be properly decrypted${NC}"
     return 0
 }
 
@@ -512,6 +626,13 @@ main() {
     if [ "$test_to_run" == "all" ] || [ "$test_to_run" == "watch" ]; then
         if ! test_watch_mode; then
             echo -e "${RED}Watch mode test failed, aborting tests${NC}"
+            exit 1
+        fi
+    fi
+    
+    if [ "$test_to_run" == "all" ] || [ "$test_to_run" == "integrity" ]; then
+        if ! test_integrity_check; then
+            echo -e "${RED}Integrity check test failed, aborting tests${NC}"
             exit 1
         fi
     fi

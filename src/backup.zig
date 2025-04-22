@@ -464,6 +464,7 @@ pub fn performBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
         if (file.is_directory) continue;
 
         const content_hash = try crypto_utils.getContentHashedPath(allocator, file.hash);
+
         if (hashes_in_source.contains(content_hash)) {
             // Hash already in map, free the duplicate
             allocator.free(content_hash);
@@ -687,3 +688,148 @@ pub fn doWatch(allocator: Allocator, conf: Config) !void {
 }
 
 const fs_watcher = @import("fs_watcher.zig");
+
+pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
+    debugPrint("Checking backup integrity for {s}\n", .{conf.output_dir});
+
+    // Get the key from the password
+    var salt: [16]u8 = undefined;
+    var key: [32]u8 = undefined;
+
+    // First try to get the salt from the existing metadata
+    const metadata_path = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, ".cryptbak.meta" });
+    defer allocator.free(metadata_path);
+
+    // Open the metadata file
+    var meta_file = fs.cwd().openFile(metadata_path, .{}) catch |err| {
+        debugPrint("Error: Cannot open metadata file: {s}\n", .{@errorName(err)});
+        return error.NoMetadataFile;
+    };
+    defer meta_file.close();
+
+    // Read the header to get the salt
+    var marker_buf: [8]u8 = undefined;
+    const marker_read = try meta_file.read(&marker_buf);
+    if (marker_read != 8 or !std.mem.eql(u8, &marker_buf, "CRYPTBAK")) {
+        debugPrint("Error: Invalid metadata file format\n", .{});
+        return error.InvalidMetadataFile;
+    }
+
+    var header_buf: [32]u8 = undefined;
+    const header_read = try meta_file.read(&header_buf);
+    if (header_read != 32) {
+        debugPrint("Error: Incomplete metadata header\n", .{});
+        return error.InvalidMetadataFile;
+    }
+
+    // Extract salt from header
+    @memcpy(salt[0..], header_buf[12..28]);
+
+    try crypto_utils.deriveCipherKey(conf.password, salt, &key);
+
+    // Try to load existing metadata
+    var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
+        debugPrint("Warning: Potential metadata issue detected: {s}\n", .{@errorName(err)});
+
+        // Create and save a new empty metadata as a fallback
+        var new_empty_metadata = BackupMetadata.init(allocator);
+        defer new_empty_metadata.deinit();
+
+        // Even if metadata is corrupted, check if content directory exists
+        const content_dir = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, "content" });
+        defer allocator.free(content_dir);
+
+        // Check if content directory exists
+        fs.cwd().access(content_dir, .{}) catch {
+            debugPrint("Error: Content directory not found: {s}\n", .{content_dir});
+            return error.ContentDirectoryMissing;
+        };
+
+        // Save the new empty metadata file
+        try metadata.saveMetadata(allocator, new_empty_metadata, conf.output_dir, key);
+        std.debug.print("Created new metadata file due to corruption of the original\n", .{});
+        std.debug.print("Recommendation: Run a full backup to restore consistency\n", .{});
+        return;
+    };
+    defer existing_metadata.deinit();
+
+    debugPrint("Loaded metadata with {d} files\n", .{existing_metadata.files.items.len});
+
+    // Ensure the content directory exists
+    const content_dir = try fs.path.join(allocator, &[_][]const u8{ conf.output_dir, "content" });
+    defer allocator.free(content_dir);
+
+    fs.cwd().access(content_dir, .{}) catch {
+        debugPrint("Error: Content directory not found: {s}\n", .{content_dir});
+        return error.ContentDirectoryMissing;
+    };
+
+    // Create a copy of metadata for tracking missing files
+    var new_metadata = BackupMetadata.init(allocator);
+    defer new_metadata.deinit();
+
+    // Track files that were found to be missing
+    var missing_files = ArrayList([]const u8).init(allocator);
+    defer {
+        for (missing_files.items) |path| {
+            allocator.free(path);
+        }
+        missing_files.deinit();
+    }
+
+    // Check each file in the metadata
+    for (existing_metadata.files.items) |file| {
+        // Skip directories, they don't have content files
+        if (file.is_directory) {
+            // Add directories directly to new metadata
+            var file_copy = file;
+            file_copy.path = try allocator.dupe(u8, file.path);
+            try new_metadata.files.append(file_copy);
+            continue;
+        }
+
+        // Get the content hash path
+        const content_hash = try crypto_utils.getContentHashedPath(allocator, file.hash);
+        defer allocator.free(content_hash);
+
+        // Check if content file exists
+        const content_path = try fs.path.join(allocator, &[_][]const u8{ content_dir, content_hash });
+        defer allocator.free(content_path);
+
+        var file_exists = true;
+        fs.cwd().access(content_path, .{}) catch {
+            file_exists = false;
+        };
+
+        if (file_exists) {
+            // Add to new metadata with a freshly allocated path
+            var file_copy = file;
+            file_copy.path = try allocator.dupe(u8, file.path);
+            try new_metadata.files.append(file_copy);
+        } else {
+            // File is missing
+            const missing_path = try allocator.dupe(u8, file.path);
+            try missing_files.append(missing_path);
+            debugPrint("Missing file detected: {s} (content hash: {s})\n", .{ file.path, content_hash });
+        }
+    }
+
+    // Report results
+    if (missing_files.items.len > 0) {
+        debugPrint("\nIntegrity check results:\n", .{});
+        debugPrint("-----------------------\n", .{});
+        debugPrint("Found {d} missing files out of {d} total files\n", .{ missing_files.items.len, existing_metadata.files.items.len });
+
+        for (missing_files.items) |path| {
+            debugPrint("  - {s}\n", .{path});
+        }
+
+        // Save the updated metadata without the missing files
+        debugPrint("\nUpdating metadata to remove missing files...\n", .{});
+        try metadata.saveMetadata(allocator, new_metadata, conf.output_dir, key);
+        debugPrint("Metadata updated successfully. Re-run backup to restore missing files.\n", .{});
+    } else {
+        debugPrint("\nIntegrity check completed successfully!\n", .{});
+        debugPrint("All {d} files in metadata were found in the backup.\n", .{existing_metadata.files.items.len});
+    }
+}

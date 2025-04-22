@@ -25,6 +25,7 @@ pub fn main() !void {
             }
         },
         .Decrypt => try backup.doDecrypt(allocator, conf),
+        .IntegrityCheck => try backup.doIntegrityCheck(allocator, conf),
     }
 }
 

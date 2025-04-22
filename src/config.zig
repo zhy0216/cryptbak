@@ -14,6 +14,7 @@ pub fn debugPrint(comptime fmt: []const u8, args: anytype) void {
 pub const Mode = enum {
     Encrypt,
     Decrypt,
+    IntegrityCheck,
 };
 
 pub const Config = struct {
@@ -30,9 +31,10 @@ pub fn parseArgs(allocator: Allocator) !Config {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 4) {
-        std.debug.print("Usage: ./cryptbak source_folder output_folder [-d] [-t] -p password [--mt seconds]\n", .{});
+        std.debug.print("Usage: ./cryptbak source_folder output_folder [-d] [-t] [-c] -p password [--mt seconds]\n", .{});
         std.debug.print("  -d        Decrypt mode (default is encrypt)\n", .{});
         std.debug.print("  -t        Watch mode: continuously monitor source folder for changes\n", .{});
+        std.debug.print("  -c        Check integrity: verify all backup files exist and update metadata\n", .{});
         std.debug.print("  -p pass   Password for encryption/decryption\n", .{});
         std.debug.print("  --mt sec  Minimum time between backups in watch mode (default: 90 seconds)\n", .{});
         return error.InvalidArguments;
@@ -54,6 +56,8 @@ pub fn parseArgs(allocator: Allocator) !Config {
             config.mode = .Decrypt;
         } else if (std.mem.eql(u8, arg, "-t")) {
             config.watch_mode = true;
+        } else if (std.mem.eql(u8, arg, "-c")) {
+            config.mode = .IntegrityCheck;
         } else if (std.mem.eql(u8, arg, "-p")) {
             if (i + 1 >= args.len) {
                 return error.MissingPassword;

@@ -14,8 +14,12 @@ This project is developed with the help of [Windsurf](https://www.windsurfrs.com
 - Support for empty directories and complex directory structures
 - Comprehensive file metadata handling
 - Enhanced privacy with filename hashing
+- Backup integrity checking to detect and report missing files
 
 ## Changelog
+
+### v0.0.7
+- Added integrity check mode (`-c`) to detect missing backup files and update metadata accordingly
 
 ### v0.0.6
 - Fix file change detection issue in watch mode
