@@ -419,6 +419,41 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     return metadata;
 }
 
+pub fn readMetadataSalt(allocator: Allocator, output_dir: []const u8) !?[16]u8 {
+    const metadata_path = try fs.path.join(allocator, &[_][]const u8{ output_dir, ".cryptbak.meta" });
+    defer allocator.free(metadata_path);
+
+    var file = fs.cwd().openFile(metadata_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            return null; // File doesn't exist, return null
+        }
+        return err;
+    };
+    defer file.close();
+
+    // Read file marker
+    const marker = "CRYPTBAK";
+    var marker_buf: [marker.len]u8 = undefined;
+    const marker_read = try file.read(&marker_buf);
+    if (marker_read != marker_buf.len or !std.mem.eql(u8, &marker_buf, marker)) {
+        debugPrint("Invalid file marker\n", .{});
+        return error.InvalidMetadataFile;
+    }
+
+    // Read unencrypted metadata header
+    var header_buf: [32]u8 = undefined;
+    const header_read = try file.read(&header_buf);
+    if (header_read != header_buf.len) {
+        return error.InvalidMetadataFile;
+    }
+
+    // Extract salt from header
+    var salt: [16]u8 = undefined;
+    @memcpy(salt[0..], header_buf[12..28]);
+    
+    return salt;
+}
+
 pub fn findOriginalPathByHash(metadata: BackupMetadata, allocator: Allocator, hash_value: []const u8) !?[]const u8 {
     for (metadata.files.items) |file| {
         if (file.is_directory) continue;

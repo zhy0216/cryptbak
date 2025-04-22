@@ -27,15 +27,21 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
         debugPrint("Event detected - Path: {s}, Kind: {any}\n", .{ event.path, event.kind });
     }
 
-    // Use all-zero initial salt for key derivation, matching doDecrypt
-    const initial_salt: [16]u8 = [_]u8{0} ** 16; // 使用固定的全零initial_salt
+    // Read salt from metadata file, same as in doEncrypt
+    const salt_opt = try metadata.readMetadataSalt(allocator, conf.output_dir);
+
     var key: [32]u8 = undefined;
-    try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
+    if (salt_opt) |salt| {
+        // If salt exists, use it to derive the key
+        debugPrint("Found existing salt in metadata\n", .{});
+        try crypto_utils.deriveCipherKey(conf.password, salt, &key);
+    } else {
+        // If no metadata exists, do a full backup instead
+        debugPrint("No existing metadata found, performing full backup instead\n", .{});
+        return doEncrypt(allocator, conf);
+    }
 
     // Try to load existing metadata
-    var empty_metadata = BackupMetadata.init(allocator);
-    defer empty_metadata.deinit();
-
     var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
         if (err == error.FileNotFound) {
             // If no metadata exists, do a full backup instead
@@ -120,10 +126,16 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
     // Ensure output directory exists
     try fs.cwd().makePath(conf.output_dir);
 
-    // Convert password to key (use deriveCipherKey instead of direct copy)
+    // Read salt from metadata file
+    const salt_opt = try metadata.readMetadataSalt(allocator, conf.source_dir);
+
+    if (salt_opt == null) {
+        return error.NoMetadataFile;
+    }
+
+    // Derive key using the read salt
     var key: [32]u8 = undefined;
-    const initial_salt: [16]u8 = [_]u8{0} ** 16; // 使用固定的全零initial_salt
-    try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
+    try crypto_utils.deriveCipherKey(conf.password, salt_opt.?, &key);
 
     // Load metadata
     var meta = try metadata.loadMetadata(allocator, conf.source_dir, key);
@@ -179,24 +191,49 @@ pub fn doEncrypt(allocator: Allocator, conf: Config) !void {
     // Ensure output directory exists
     try fs.cwd().makePath(conf.output_dir);
 
-    // Use all-zero initial salt for key derivation, matching doDecrypt
-    const initial_salt: [16]u8 = [_]u8{0} ** 16; // 使用固定的全零initial_salt
+    // 1. Try to read salt from metadata file
+    const salt_opt = try metadata.readMetadataSalt(allocator, conf.output_dir);
+
     var key: [32]u8 = undefined;
-    try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
+    if (salt_opt) |salt| {
+        // If salt exists, use it to derive the key
+        debugPrint("Found existing salt in metadata\n", .{});
+        try crypto_utils.deriveCipherKey(conf.password, salt, &key);
 
-    // 1. Load existing metadata (if available) or create empty metadata
-    var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
-        if (err == error.FileNotFound) {
-            // If no metadata exists, create an empty one
-            const new_empty_metadata = BackupMetadata.init(allocator);
-            debugPrint("No existing metadata found, starting with empty metadata\n", .{});
-            return performBackup(allocator, conf, key, new_empty_metadata);
+        // Try to load complete metadata
+        var existing_metadata = metadata.loadMetadata(allocator, conf.output_dir, key) catch |err| {
+            // If decryption fails, password might be wrong
+            debugPrint("Warning: Failed to decrypt metadata: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        defer existing_metadata.deinit();
+
+        // Ensure metadata salt matches the read salt
+        if (existing_metadata.key_salt) |meta_salt| {
+            if (!std.mem.eql(u8, &salt, &meta_salt)) {
+                // Salt doesn't match, update it in metadata
+                existing_metadata.key_salt = salt;
+            }
+        } else {
+            // No salt in metadata, add it
+            existing_metadata.key_salt = salt;
         }
-        return err;
-    };
-    defer existing_metadata.deinit();
 
-    return performBackup(allocator, conf, key, existing_metadata);
+        return performBackup(allocator, conf, key, existing_metadata);
+    } else {
+        // If salt doesn't exist, create new metadata and salt
+        var new_empty_metadata = BackupMetadata.init(allocator);
+
+        // Generate random salt for new metadata
+        const new_salt = crypto_utils.generateRandomSalt();
+        new_empty_metadata.key_salt = new_salt;
+
+        // Derive key using new salt
+        try crypto_utils.deriveCipherKey(conf.password, new_salt, &key);
+
+        debugPrint("No existing metadata found, starting with empty metadata and new salt\n", .{});
+        return performBackup(allocator, conf, key, new_empty_metadata);
+    }
 }
 
 // Refactored version of performBackup that clearly separates the backup process into steps
@@ -243,11 +280,13 @@ pub fn performBackup(allocator: Allocator, conf: Config, key: [32]u8, existing_m
         var needs_update = false;
 
         if (existing_file_opt == null) {
+            // New file
             debugPrint("New file: {s}\n", .{file.path});
             needs_update = true;
         } else {
             const existing_file = existing_file_opt.?;
             if (!std.mem.eql(u8, &existing_file.hash, &file.hash) or existing_file.size != file.size) {
+                // File has been modified
                 debugPrint("Changed file: {s}\n", .{file.path});
                 needs_update = true;
             }
@@ -509,10 +548,17 @@ const fs_watcher = @import("fs_watcher.zig");
 pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
     debugPrint("Checking backup integrity for {s}\n", .{conf.output_dir});
 
-    // Derive encryption key from password
+    // Read salt from metadata file
+    const salt_opt = try metadata.readMetadataSalt(allocator, conf.output_dir);
+
+    if (salt_opt == null) {
+        debugPrint("No metadata file found\n", .{});
+        return error.NoMetadataFile;
+    }
+
+    // Derive key using the read salt
     var key: [32]u8 = undefined;
-    const initial_salt: [16]u8 = [_]u8{0} ** 16; // 使用固定的全零initial_salt
-    try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
+    try crypto_utils.deriveCipherKey(conf.password, salt_opt.?, &key);
 
     // Try to load existing metadata
     var existing_metadata: BackupMetadata = undefined;
