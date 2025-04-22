@@ -208,8 +208,7 @@ pub fn doPartialBackup(allocator: Allocator, conf: Config, events: []const fs_wa
     }
 
     // Use all-zero initial salt for key derivation, matching doDecrypt
-    var initial_salt: [16]u8 = undefined;
-    @memset(&initial_salt, 0); // Use all-zero salt for initialization
+    const initial_salt: [16]u8 = [_]u8{0} ** 16; // 使用固定的全零initial_salt
     var key: [32]u8 = undefined;
     try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
 
@@ -303,8 +302,7 @@ pub fn doDecrypt(allocator: Allocator, conf: Config) !void {
 
     // Convert password to key (use deriveCipherKey instead of direct copy)
     var key: [32]u8 = undefined;
-    var initial_salt: [16]u8 = undefined;
-    @memset(&initial_salt, 0); // Use all-zero salt for initialization
+    const initial_salt: [16]u8 = [_]u8{0} ** 16; // 使用固定的全零initial_salt
     try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
 
     // Load metadata
@@ -362,8 +360,7 @@ pub fn doEncrypt(allocator: Allocator, conf: Config) !void {
     try fs.cwd().makePath(conf.output_dir);
 
     // Use all-zero initial salt for key derivation, matching doDecrypt
-    var initial_salt: [16]u8 = undefined;
-    @memset(&initial_salt, 0); // Use all-zero salt for initialization
+    const initial_salt: [16]u8 = [_]u8{0} ** 16; // 使用固定的全零initial_salt
     var key: [32]u8 = undefined;
     try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
 
@@ -694,8 +691,8 @@ pub fn doIntegrityCheck(allocator: Allocator, conf: Config) !void {
 
     // Derive encryption key from password
     var key: [32]u8 = undefined;
-    const salt = crypto_utils.generateRandomSalt();
-    try crypto_utils.deriveCipherKey(conf.password, salt, &key);
+    const initial_salt: [16]u8 = [_]u8{0} ** 16; // 使用固定的全零initial_salt
+    try crypto_utils.deriveCipherKey(conf.password, initial_salt, &key);
 
     // Try to load existing metadata
     var existing_metadata: BackupMetadata = undefined;

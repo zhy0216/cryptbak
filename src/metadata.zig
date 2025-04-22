@@ -21,11 +21,15 @@ pub const BackupMetadata = struct {
     version: u32 = 1,
     timestamp: i64,
     files: ArrayList(FileMetadata),
+    metadata_nonce: ?[12]u8 = null, // Nonce for ChaCha20 encryption, null if not set
+    key_salt: ?[16]u8 = null, // Salt for key derivation, null if not set
 
     pub fn init(allocator: Allocator) BackupMetadata {
         return BackupMetadata{
             .timestamp = time.milliTimestamp(),
             .files = ArrayList(FileMetadata).init(allocator),
+            .metadata_nonce = null,
+            .key_salt = null,
         };
     }
 
@@ -38,8 +42,16 @@ pub const BackupMetadata = struct {
 };
 
 pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: []const u8, key: [32]u8) !void {
-    // Generate nonce for metadata encryption
-    var metadata_nonce = crypto_utils.generateRandomSalt()[0..12].*;
+    // Use existing nonce or generate a new one
+    var local_metadata = metadata;
+    var metadata_nonce: [12]u8 = undefined;
+    
+    if (local_metadata.metadata_nonce) |nonce| {
+        metadata_nonce = nonce;
+    } else {
+        metadata_nonce = crypto_utils.generateRandomSalt()[0..12].*;
+        local_metadata.metadata_nonce = metadata_nonce;
+    }
 
     const metadata_path = try fs.path.join(allocator, &[_][]const u8{ output_dir, ".cryptbak.meta" });
     defer allocator.free(metadata_path);
@@ -51,8 +63,15 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
     var buffer = ArrayList(u8).init(allocator);
     defer buffer.deinit();
 
-    // Generate full salt for key derivation
-    var full_salt = crypto_utils.generateRandomSalt();
+    // Use existing salt or generate a new one
+    var full_salt: [16]u8 = undefined;
+    if (local_metadata.key_salt) |salt| {
+        full_salt = salt;
+    } else {
+        full_salt = crypto_utils.generateRandomSalt();
+        local_metadata.key_salt = full_salt;
+    }
+    
     var enc_key: [32]u8 = undefined;
     try crypto_utils.deriveCipherKey(key[0..], full_salt, &enc_key);
 
@@ -60,17 +79,16 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
     const marker = "CRYPTBAK";
     try file.writeAll(marker);
 
-    // Write file format version, timestamp, and file count as unencrypted header
+    // Write file format version, timestamp, and salt as unencrypted header
     var header_buf: [32]u8 = undefined;
-    std.mem.writeInt(u32, header_buf[0..4], metadata.version, .little);
-    std.mem.writeInt(i64, header_buf[4..12], metadata.timestamp, .little);
-    // File count is moved to the encrypted section for better security
+    std.mem.writeInt(u32, header_buf[0..4], local_metadata.version, .little);
+    std.mem.writeInt(i64, header_buf[4..12], local_metadata.timestamp, .little);
     @memcpy(header_buf[12..28], full_salt[0..]);
     try file.writeAll(&header_buf);
 
     // Debug output
-    debugPrint("SaveMetadata: Timestamp = {d}\n", .{metadata.timestamp});
-    debugPrint("SaveMetadata: Files count = {d}\n", .{metadata.files.items.len});
+    debugPrint("SaveMetadata: Timestamp = {d}\n", .{local_metadata.timestamp});
+    debugPrint("SaveMetadata: Files count = {d}\n", .{local_metadata.files.items.len});
 
     // Write nonce
     try file.writeAll(&metadata_nonce);
@@ -88,10 +106,10 @@ pub fn saveMetadata(allocator: Allocator, metadata: BackupMetadata, output_dir: 
 
     // Write file count
     var files_count_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &files_count_bytes, @as(u32, @intCast(metadata.files.items.len)), .little);
+    std.mem.writeInt(u32, &files_count_bytes, @as(u32, @intCast(local_metadata.files.items.len)), .little);
     try writer.writeAll(&files_count_bytes);
 
-    for (metadata.files.items) |file_meta| {
+    for (local_metadata.files.items) |file_meta| {
         // Write path length
         var path_len_bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &path_len_bytes, file_meta.path.len, .little);
@@ -183,6 +201,7 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
         .version = version,
         .timestamp = timestamp,
         .files = ArrayList(FileMetadata).init(allocator),
+        .key_salt = full_salt,
     };
 
     // Read nonce
@@ -191,6 +210,8 @@ pub fn loadMetadata(allocator: Allocator, output_dir: []const u8, key: [32]u8) !
     if (nonce_read != metadata_nonce.len) {
         return error.InvalidMetadataFile;
     }
+
+    metadata.metadata_nonce = metadata_nonce;
 
     debugPrint("LoadMetadata: Nonce bytes = [ ", .{});
     if (config.enable_debug_output) {
