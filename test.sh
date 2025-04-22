@@ -314,6 +314,11 @@ test_watch_mode() {
     fi
     echo "Initial content files count: $initial_content_files_count"
     
+    # Record file checksums before starting watch mode
+    echo "Recording initial file checksums..."
+    local initial_checksums_file="/tmp/initial_checksums.txt"
+    find "$BACKUP_DIR/content" -type f -exec sha256sum {} \; | sort > "$initial_checksums_file"
+    
     # Now start watch mode
     echo "Starting cryptbak in watch mode..."
     "$CRYPTBAK_BIN" "$SOURCE_DIR" "$BACKUP_DIR" -t -p "$TEST_PASSWORD" --mt 1 > /tmp/watch_output.log 2>&1 &
@@ -323,16 +328,24 @@ test_watch_mode() {
     echo "Waiting for watch mode to initialize (3 seconds)..."
     sleep 3
     
-    # Create new files with unique timestamps
-    echo "Creating new test files..."
+    # Test Scenario 1: Create new files with unique timestamps
+    echo "Test scenario 1: Creating new test files..."
     local timestamp=$(date +%s)
     echo "This is test file 1" > "$SOURCE_DIR/test_file_1_$timestamp.txt"
     sleep 1
     echo "This is test file 2" > "$SOURCE_DIR/test_file_2_$timestamp.txt"
     
-    # Wait longer for watch mode to detect changes
-    echo "Waiting for backup to occur (8 seconds)..."
-    sleep 8
+    # Wait for changes to be detected and backed up
+    echo "Waiting for backup to occur (5 seconds)..."
+    sleep 5
+    
+    # Test Scenario 2: Modify existing file contents
+    echo "Test scenario 2: Modifying existing file contents..."
+    echo "Modified content for initial file" > "$SOURCE_DIR/initial_file.txt"
+    
+    # Wait for changes to be detected and backed up
+    echo "Waiting for content change backup to occur (5 seconds)..."
+    sleep 5
     
     # Terminate the watch process
     echo "Terminating watch mode process..."
@@ -345,14 +358,32 @@ test_watch_mode() {
         final_content_files_count=$(find "$BACKUP_DIR/content" -type f | wc -l)
     fi
     
+    # Record file checksums after watch mode
+    echo "Recording final file checksums..."
+    local final_checksums_file="/tmp/final_checksums.txt"
+    find "$BACKUP_DIR/content" -type f -exec sha256sum {} \; | sort > "$final_checksums_file"
+    
+    # Compare checksums to find new content files
+    local new_checksums=$(comm -13 "$initial_checksums_file" "$final_checksums_file")
+    local new_checksums_count=$(echo "$new_checksums" | grep -v "^$" | wc -l)
+    
     echo "Content files count - Initial: $initial_content_files_count, Final: $final_content_files_count, Difference: $((final_content_files_count - initial_content_files_count))"
+    echo "New unique content files based on checksums: $new_checksums_count"
     
     # Display watch output for debugging
     echo "Watch mode log output:"
     cat /tmp/watch_output.log
     
+    # Verify new files were added
     if [ $final_content_files_count -le $initial_content_files_count ]; then
         echo -e "${RED}Failed: No new content files added during watch mode${NC}"
+        return 1
+    fi
+    
+    # Verify content changes resulted in new content files
+    if [ $new_checksums_count -lt 3 ]; then # We expect at least 3 new files (2 new files + 1 modified file)
+        echo -e "${RED}Failed: Content changes did not result in expected number of new content files${NC}"
+        echo "Expected at least 3 new content files, got $new_checksums_count"
         return 1
     fi
     
@@ -362,7 +393,7 @@ test_watch_mode() {
         return 1
     fi
     
-    echo -e "${GREEN}Test 4 passed: Watch mode successfully detected and backed up file changes${NC}"
+    echo -e "${GREEN}Test 4 passed: Watch mode successfully detected and backed up new files and content changes${NC}"
     return 0
 }
 

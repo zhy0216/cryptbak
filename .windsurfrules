@@ -1,2 +1,3 @@
 1. when write changelogs, update README in English. Update README_CN.md in Chinese.
 2. all comments should be in English.
+3. whenever you make changes on code, run zig build make sure compile successfully.

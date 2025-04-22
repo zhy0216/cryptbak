@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 
 const config = @import("config.zig");
+const metadata = @import("metadata.zig");
 const debugPrint = config.debugPrint;
 
 pub const WatchEvent = struct {
@@ -23,7 +24,7 @@ pub const FSWatcher = struct {
     path: []const u8,
     is_running: bool,
     events: ArrayList(WatchEvent),
-    existing_files: std.StringHashMap(void), // Track existing files
+    existing_files: std.StringHashMap(metadata.FileMetadata), // Track existing files
 
     // Platform-specific fields
     fd: i32 = -1, // For Linux inotify
@@ -36,7 +37,7 @@ pub const FSWatcher = struct {
             .path = try allocator.dupe(u8, watch_path),
             .is_running = false,
             .events = ArrayList(WatchEvent).init(allocator),
-            .existing_files = std.StringHashMap(void).init(allocator),
+            .existing_files = std.StringHashMap(metadata.FileMetadata).init(allocator),
         };
 
         try watcher.initPlatformSpecific();
@@ -56,6 +57,8 @@ pub const FSWatcher = struct {
         // This avoids potential double-free issues during testing
         var it = self.existing_files.keyIterator();
         while (it.next()) |key| {
+            const file_metadata = self.existing_files.get(key.*).?;
+            self.allocator.free(file_metadata.path);
             self.allocator.free(key.*);
         }
         self.existing_files.deinit();
@@ -116,7 +119,7 @@ pub const FSWatcher = struct {
         var seen_files = std.StringHashMap(void).init(self.allocator);
         defer seen_files.deinit();
 
-        debugPrint("[FSWatcher] Starting directory iteration, existing_files count = {d}\n", .{self.existing_files.count()});
+        debugPrint("[FSWatcher] Starting directory iteration, existing_files count = {d}\n", .{ self.existing_files.count() });
 
         // First scan directory to find all current files
         var iter = dir.iterate();
@@ -124,21 +127,69 @@ pub const FSWatcher = struct {
             // Store name in current_files
             try current_files.put(entry.name, {});
 
+            // Only process regular files
+            if (entry.kind != .file) {
+                debugPrint("[FSWatcher] Skipping non-file entry: {s}, type = {s}\n", .{ entry.name, @tagName(entry.kind) });
+                try seen_files.put(entry.name, {});
+                continue;
+            }
+
+            // Get file metadata for checking modifications
+            const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
+            defer self.allocator.free(full_path);
+            
+            // Get stat info for the file to check for modifications
+            const file_stat = try fs.cwd().statFile(full_path);
+            // Create a path copy for storing in metadata
+            const path_copy = try self.allocator.dupe(u8, entry.name);
+            const metadata_obj = metadata.FileMetadata{
+                .path = path_copy,
+                .last_modified = file_stat.mtime,
+                .size = file_stat.size,
+                .hash = [_]u8{0} ** 32, // Not computing hash for watcher
+                .is_directory = entry.kind == .directory,
+            };
+
             // Check if this is a new file that we haven't seen before
             if (!self.existing_files.contains(entry.name)) {
-                const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
                 debugPrint("[FSWatcher] Full scan found new file: {s}, type = {s}\n", .{ entry.name, @tagName(entry.kind) });
 
                 // Store a copy of the name in existing_files
                 const name_copy = try self.allocator.dupe(u8, entry.name);
-                try self.existing_files.put(name_copy, {});
+                try self.existing_files.put(name_copy, metadata_obj);
 
+                // Add create event
+                const event_path_copy = try self.allocator.dupe(u8, full_path);
                 try self.events.append(WatchEvent{
-                    .path = full_path,
+                    .path = event_path_copy,
                     .kind = .Create,
                 });
             } else {
-                debugPrint("[FSWatcher] Full scan found existing file: {s}\n", .{entry.name});
+                // File exists, check if it was modified
+                const existing_metadata = self.existing_files.get(entry.name).?;
+                
+                // Check if size or modification time changed
+                if (existing_metadata.size != metadata_obj.size or
+                    existing_metadata.last_modified != metadata_obj.last_modified) {
+                    debugPrint("[FSWatcher] Full scan detected modified file: {s}\n", .{entry.name});
+                    debugPrint("  Old: size={d}, mtime={d}\n", .{existing_metadata.size, existing_metadata.last_modified});
+                    debugPrint("  New: size={d}, mtime={d}\n", .{metadata_obj.size, metadata_obj.last_modified});
+                    
+                    // Free the old path and update the metadata
+                    self.allocator.free(existing_metadata.path);
+                    self.existing_files.put(entry.name, metadata_obj) catch {};
+                    
+                    // Add modify event
+                    const event_path_copy = try self.allocator.dupe(u8, full_path);
+                    try self.events.append(WatchEvent{
+                        .path = event_path_copy,
+                        .kind = .Modify,
+                    });
+                } else {
+                    // File unchanged, free the new path copy
+                    self.allocator.free(metadata_obj.path);
+                    debugPrint("[FSWatcher] Full scan found unchanged file: {s}\n", .{entry.name});
+                }
             }
 
             // Always mark this file as seen, whether it's new or existing
@@ -176,6 +227,8 @@ pub const FSWatcher = struct {
         for (files_to_remove.items) |file_name| {
             if (self.existing_files.fetchRemove(file_name)) |kv| {
                 debugPrint("[FSWatcher] Removing file from tracking: {s}\n", .{file_name});
+                const file_metadata = kv.value;
+                self.allocator.free(file_metadata.path);
                 self.allocator.free(kv.key);
             }
         }
@@ -241,11 +294,30 @@ pub const FSWatcher = struct {
 
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
-            // Just store filenames for later comparison
-            const name_copy = try self.allocator.dupe(u8, entry.name);
+            // Only process regular files
+            if (entry.kind != .file) {
+                continue;
+            }
 
-            // Store the name in existing_files map
-            try self.existing_files.put(name_copy, {});
+            // Get file metadata for checking modifications
+            const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
+            defer self.allocator.free(full_path);
+            
+            // Get stat info for the file to check for modifications
+            const file_stat = try fs.cwd().statFile(full_path);
+            // Create a path copy for storing in metadata
+            const path_copy = try self.allocator.dupe(u8, entry.name);
+            const metadata_obj = metadata.FileMetadata{
+                .path = path_copy,
+                .last_modified = file_stat.mtime,
+                .size = file_stat.size,
+                .hash = [_]u8{0} ** 32, // Not computing hash for watcher
+                .is_directory = entry.kind == .directory,
+            };
+
+            // Store the name and metadata in existing_files map
+            const name_copy = try self.allocator.dupe(u8, entry.name);
+            try self.existing_files.put(name_copy, metadata_obj);
         }
 
         debugPrint("Initial scan complete - indexed {d} items\n", .{self.existing_files.count()});
@@ -490,6 +562,13 @@ pub const FSWatcher = struct {
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             const name_copy = try self.allocator.dupe(u8, entry.name);
+
+            // Only process regular files
+            if (entry.kind != .file) {
+                self.allocator.free(name_copy);
+                continue;
+            }
+
             try current_files.put(name_copy, {});
 
             // Check if this is a new file that wasn't in our initial scan
@@ -506,7 +585,21 @@ pub const FSWatcher = struct {
 
                 // Add to existing files to avoid reporting it twice
                 const orig_name_copy = try self.allocator.dupe(u8, entry.name);
-                try self.existing_files.put(orig_name_copy, {});
+                
+                // Get the full path and stat to access modification time
+                const file_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
+                defer self.allocator.free(file_path);
+                
+                const file_stat = try fs.cwd().statFile(file_path);
+                
+                const file_metadata = metadata.FileMetadata{
+                    .path = orig_name_copy,
+                    .last_modified = file_stat.mtime,
+                    .size = file_stat.size,
+                    .hash = [_]u8{0} ** 32, // Not computing hash for watcher
+                    .is_directory = entry.kind == .directory,
+                };
+                try self.existing_files.put(orig_name_copy, file_metadata);
 
                 has_events = true;
             }
@@ -520,6 +613,11 @@ pub const FSWatcher = struct {
             for (0..@intCast(nevents)) |_| {
                 var iter2 = dir.iterate();
                 while (try iter2.next()) |entry| {
+                    // Only process regular files
+                    if (entry.kind != .file) {
+                        continue;
+                    }
+
                     // Check if it's been modified
                     if (self.existing_files.contains(entry.name)) {
                         const full_path = try fs.path.join(self.allocator, &[_][]const u8{ self.path, entry.name });
@@ -755,13 +853,23 @@ pub const PollingFSWatcher = struct {
             }
         }
 
-        // Update last scan
+        debugPrint("[PollingFSWatcher] Found {d} files to remove from tracking\n", .{self.last_scan.count()});
+
+        // Now remove deleted files from last_scan
         var it = self.last_scan.keyIterator();
         while (it.next()) |key| {
-            self.allocator.free(key.*);
-        }
-        self.last_scan.clearRetainingCapacity();
+            const file_name = key.*;
+            if (current_scan.contains(file_name)) {
+                continue;
+            }
 
+            if (self.last_scan.fetchRemove(file_name)) |kv| {
+                debugPrint("[PollingFSWatcher] Removing file from tracking: {s}\n", .{file_name});
+                self.allocator.free(kv.key);
+            }
+        }
+
+        // Update last scan
         current_it = current_scan.iterator();
         while (current_it.next()) |entry| {
             const path_copy = try self.allocator.dupe(u8, entry.key_ptr.*);
@@ -848,7 +956,7 @@ test "FSWatcher scan" {
         .path = try temp_allocator.dupe(u8, test_dir),
         .is_running = true,
         .events = ArrayList(WatchEvent).init(temp_allocator),
-        .existing_files = std.StringHashMap(void).init(temp_allocator),
+        .existing_files = std.StringHashMap(metadata.FileMetadata).init(temp_allocator),
         .fd = -1,
         .kq = -1,
         .handle = null,
@@ -864,6 +972,8 @@ test "FSWatcher scan" {
         // Free all keys in existing_files
         var it = watcher.existing_files.keyIterator();
         while (it.next()) |key| {
+            const file_metadata = watcher.existing_files.get(key.*).?;
+            temp_allocator.free(file_metadata.path);
             temp_allocator.free(key.*);
         }
         watcher.existing_files.deinit();
@@ -927,7 +1037,7 @@ test "FSWatcher checkEvents" {
         .path = try temp_allocator.dupe(u8, test_dir),
         .is_running = true,
         .events = ArrayList(WatchEvent).init(temp_allocator),
-        .existing_files = std.StringHashMap(void).init(temp_allocator),
+        .existing_files = std.StringHashMap(metadata.FileMetadata).init(temp_allocator),
         .fd = -1,
         .kq = -1,
         .handle = null,
@@ -943,6 +1053,8 @@ test "FSWatcher checkEvents" {
         // Free all keys in existing_files
         var it = watcher.existing_files.keyIterator();
         while (it.next()) |key| {
+            const file_metadata = watcher.existing_files.get(key.*).?;
+            temp_allocator.free(file_metadata.path);
             temp_allocator.free(key.*);
         }
         watcher.existing_files.deinit();
