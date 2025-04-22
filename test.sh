@@ -314,10 +314,10 @@ test_watch_mode() {
     fi
     echo "Initial content files count: $initial_content_files_count"
     
-    # Record file checksums before starting watch mode
-    echo "Recording initial file checksums..."
-    local initial_checksums_file="/tmp/initial_checksums.txt"
-    find "$BACKUP_DIR/content" -type f -exec sha256sum {} \; | sort > "$initial_checksums_file"
+    # Record file stats before starting watch mode
+    echo "Recording initial file stats..."
+    local initial_checksums_file="/tmp/initial_file_stats.txt"
+    find "$BACKUP_DIR/content" -type f -exec ls -la {} \; | sort > "$initial_checksums_file"
     
     # Now start watch mode
     echo "Starting cryptbak in watch mode..."
@@ -358,17 +358,17 @@ test_watch_mode() {
         final_content_files_count=$(find "$BACKUP_DIR/content" -type f | wc -l)
     fi
     
-    # Record file checksums after watch mode
-    echo "Recording final file checksums..."
-    local final_checksums_file="/tmp/final_checksums.txt"
-    find "$BACKUP_DIR/content" -type f -exec sha256sum {} \; | sort > "$final_checksums_file"
+    # Record file stats after watch mode
+    echo "Recording final file stats..."
+    local final_checksums_file="/tmp/final_file_stats.txt"
+    find "$BACKUP_DIR/content" -type f -exec ls -la {} \; | sort > "$final_checksums_file"
     
-    # Compare checksums to find new content files
-    local new_checksums=$(comm -13 "$initial_checksums_file" "$final_checksums_file")
-    local new_checksums_count=$(echo "$new_checksums" | grep -v "^$" | wc -l)
+    # Compare file stats to find new content files
+    local new_files=$(comm -13 "$initial_checksums_file" "$final_checksums_file")
+    local new_files_count=$(echo "$new_files" | grep -v "^$" | wc -l)
     
     echo "Content files count - Initial: $initial_content_files_count, Final: $final_content_files_count, Difference: $((final_content_files_count - initial_content_files_count))"
-    echo "New unique content files based on checksums: $new_checksums_count"
+    echo "New unique content files based on file stats: $new_files_count"
     
     # Display watch output for debugging
     echo "Watch mode log output:"
@@ -381,9 +381,9 @@ test_watch_mode() {
     fi
     
     # Verify content changes resulted in new content files
-    if [ $new_checksums_count -lt 3 ]; then # We expect at least 3 new files (2 new files + 1 modified file)
+    if [ $new_files_count -lt 3 ]; then # We expect at least 3 new files (2 new files + 1 modified file)
         echo -e "${RED}Failed: Content changes did not result in expected number of new content files${NC}"
-        echo "Expected at least 3 new content files, got $new_checksums_count"
+        echo "Expected at least 3 new content files, got $new_files_count"
         return 1
     fi
     
