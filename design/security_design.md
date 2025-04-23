@@ -130,7 +130,6 @@ Cryptbak does not currently protect against:
 2. **Password strength**: User must choose a strong password; no password strength enforcement
 3. **Forward secrecy**: Changing the password doesn't re-encrypt existing backups
 4. **Key management**: No key rotation functionality
-5. **Authenticated encryption**: Lacks integrated authentication tags for encrypted content
 
 ## Implementation Details
 
@@ -156,12 +155,8 @@ All cryptographic operations use the standard library's implementation of crypto
 
 1. **Authenticated Encryption**: Add AEAD (Authenticated Encryption with Associated Data) using ChaCha20-Poly1305 to detect tampering
 2. **Key separation**: Derive separate keys for metadata and content encryption
-3. **Key rotation**: Implement secure key rotation capability
-4. **Backup versioning**: Store multiple versions of files with separate encryption keys
-5. **Multi-factor authentication**: Support additional authentication factors
-6. **Memory security**: Implement secure memory handling for sensitive data
-7. **Metadata format hardening**: Add authentication tags for metadata blocks to detect tampering
-8. **Switch to scrypt or Argon2**: Consider stronger password hashing algorithms than PBKDF2 for key derivation
+3. **Switch to scrypt**: Consider stronger password hashing algorithms than PBKDF2 for key derivation
+
 
 ## References
 
