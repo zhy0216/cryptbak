@@ -18,6 +18,11 @@ This project is developed with the help of [Windsurf](https://www.windsurfrs.com
 
 ## Changelog
 
+### v0.0.8
+- Fixed key handling in metadata operations 
+- Fixed metadata nonce preservation between backup operations to ensure encryption consistency
+- Improved integrity check functionality and reliability
+
 ### v0.0.7
 - Added integrity check mode (`-c`) to detect missing backup files and update metadata accordingly
 
