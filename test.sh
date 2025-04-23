@@ -418,20 +418,22 @@ test_integrity_check() {
     echo "Setting up initial backup for integrity test..."
     run_cmd "$CRYPTBAK_BIN" "$integrity_source" "$integrity_backup" -p "$TEST_PASSWORD" || return 1
     
-    sleep 1
+    sleep 3
 
     # Perform integrity check
     echo "Running integrity check..."
-    run_cmd "$CRYPTBAK_BIN" "$integrity_source" "$integrity_backup" -c -p "$TEST_PASSWORD" > /tmp/integrity_output.log 2>&1 || {
+    run_cmd "$CRYPTBAK_BIN" "$integrity_source" "$integrity_backup" -c -p "$TEST_PASSWORD" > /tmp/integrity_output1.log 2>&1 || {
         echo -e "${RED}Failed: Integrity check returned an error${NC}"
         cat /tmp/integrity_output.log
         return 1
     }
+
+    sleep 1
     
     # Verify integrity check output
     if grep -q "Recommendation: Run a full backup to restore consistency" /tmp/integrity_output1.log; then
         echo -e "${RED}Failed: Integrity check detected missing file${NC}"
-        cat /tmp/integrity_output.log
+        cat /tmp/integrity_output1.log
         return 1
     fi
     # Count the files in content directory
@@ -458,14 +460,14 @@ test_integrity_check() {
     echo "Running integrity check..."
     run_cmd "$CRYPTBAK_BIN" "$integrity_source" "$integrity_backup" -c -p "$TEST_PASSWORD" > /tmp/integrity_output2.log 2>&1 || {
         echo -e "${RED}Failed: Integrity check returned an error${NC}"
-        cat /tmp/integrity_output.log
+        cat /tmp/integrity_output2.log
         return 1
     }
     
     # Verify integrity check output
-    if ! grep -q "Recommendation: Run a full backup to restore consistency" /tmp/integrity_output.log; then
+    if ! grep -q "Missing file detected" /tmp/integrity_output2.log; then
         echo -e "${RED}Failed: Integrity check did not detect missing file${NC}"
-        cat /tmp/integrity_output.log
+        cat /tmp/integrity_output2.log
         return 1
     fi
     
